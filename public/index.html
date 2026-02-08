@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crypto Arbitrage Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    body { background: #0f172a; }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+    }
+    .stat-card {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      border: 1px solid #334155;
+      border-radius: 12px;
+    }
+    .profit-positive { color: #4ade80; }
+    .profit-negative { color: #f87171; }
+    .badge-simple {
+      background: #3b82f6;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+    }
+    .badge-triangular {
+      background: #a855f7;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+    }
+    .pulse { animation: pulse 2s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    .table-row:hover { background: #334155; }
+  </style>
+</head>
+<body class="text-gray-200 min-h-screen">
+
+  <!-- Header -->
+  <header class="border-b border-slate-700 bg-slate-900/80 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-xl font-bold">A</div>
+        <div>
+          <h1 class="text-xl font-bold text-white">Crypto Arbitrage</h1>
+          <p class="text-xs text-slate-400">Binance &middot; Coinbase &middot; Kraken &middot; Bybit</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-4">
+        <div id="status-indicator" class="flex items-center gap-2 text-sm">
+          <span class="w-2 h-2 rounded-full bg-green-400 pulse"></span>
+          <span class="text-slate-400">Live</span>
+        </div>
+        <div id="last-update" class="text-xs text-slate-500"></div>
+        <button onclick="refreshAll()" class="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm transition-colors">
+          Rafra&icirc;chir
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+    <!-- Stats cards -->
+    <section id="stats-section" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="stat-card p-4">
+        <p class="text-xs text-slate-400 uppercase tracking-wide">Opportunit&eacute;s aujourd'hui</p>
+        <p id="stat-total" class="text-3xl font-bold text-white mt-1">--</p>
+        <p id="stat-alltime" class="text-xs text-slate-500 mt-1">Total: --</p>
+      </div>
+      <div class="stat-card p-4">
+        <p class="text-xs text-slate-400 uppercase tracking-wide">Profit moyen</p>
+        <p id="stat-avg" class="text-3xl font-bold mt-1">--</p>
+        <p class="text-xs text-slate-500 mt-1">net apr&egrave;s frais</p>
+      </div>
+      <div class="stat-card p-4">
+        <p class="text-xs text-slate-400 uppercase tracking-wide">Meilleur profit</p>
+        <p id="stat-max" class="text-3xl font-bold mt-1">--</p>
+        <p id="stat-max-label" class="text-xs text-slate-500 mt-1">record du jour</p>
+      </div>
+      <div class="stat-card p-4">
+        <p class="text-xs text-slate-400 uppercase tracking-wide">Alertes (&ge;2%)</p>
+        <p id="stat-alerts" class="text-3xl font-bold text-yellow-400 mt-1">--</p>
+        <p class="text-xs text-slate-500 mt-1">seuil Telegram</p>
+      </div>
+    </section>
+
+    <!-- Charts -->
+    <section class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div class="card p-4">
+        <h2 class="text-sm font-semibold text-slate-300 mb-3">Opportunit&eacute;s sur 7 jours</h2>
+        <canvas id="timelineChart" height="200"></canvas>
+      </div>
+      <div class="card p-4">
+        <h2 class="text-sm font-semibold text-slate-300 mb-3">Meilleurs profits par exchange</h2>
+        <canvas id="exchangeChart" height="200"></canvas>
+      </div>
+    </section>
+
+    <!-- Filters + Opportunities table -->
+    <section class="card p-4">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <h2 class="text-sm font-semibold text-slate-300">Opportunit&eacute;s (derni&egrave;res 24h)</h2>
+        <div class="flex items-center gap-2">
+          <select id="filter-type" onchange="loadOpportunities()" class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm">
+            <option value="">Tous les types</option>
+            <option value="simple">Simple</option>
+            <option value="triangular">Triangulaire</option>
+          </select>
+          <select id="filter-profit" onchange="loadOpportunities()" class="bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-sm">
+            <option value="0">Tout profit</option>
+            <option value="0.5">&ge; 0.5%</option>
+            <option value="1">&ge; 1%</option>
+            <option value="2">&ge; 2%</option>
+            <option value="5">&ge; 5%</option>
+          </select>
+        </div>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-slate-400 border-b border-slate-700">
+              <th class="pb-2 pr-4">Heure</th>
+              <th class="pb-2 pr-4">Type</th>
+              <th class="pb-2 pr-4">Paire</th>
+              <th class="pb-2 pr-4">Exchanges</th>
+              <th class="pb-2 pr-4">Prix achat</th>
+              <th class="pb-2 pr-4">Prix vente</th>
+              <th class="pb-2 pr-4 text-right">Profit net</th>
+            </tr>
+          </thead>
+          <tbody id="opp-table-body">
+            <tr><td colspan="7" class="py-8 text-center text-slate-500">Chargement...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div id="opp-pagination" class="flex items-center justify-between mt-4 text-xs text-slate-400">
+        <span id="opp-count"></span>
+        <div class="flex gap-2">
+          <button id="btn-prev" onclick="changePage(-1)" class="px-3 py-1 bg-slate-700 rounded disabled:opacity-30" disabled>Pr&eacute;c&eacute;dent</button>
+          <button id="btn-next" onclick="changePage(1)" class="px-3 py-1 bg-slate-700 rounded disabled:opacity-30" disabled>Suivant</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Last scans -->
+    <section class="card p-4">
+      <h2 class="text-sm font-semibold text-slate-300 mb-3">Derniers scans</h2>
+      <div id="scans-list" class="space-y-2">
+        <p class="text-slate-500 text-sm">Chargement...</p>
+      </div>
+    </section>
+
+    <!-- Top all time -->
+    <section class="card p-4">
+      <h2 class="text-sm font-semibold text-slate-300 mb-3">Top 10 - Meilleurs profits (historique)</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="text-left text-slate-400 border-b border-slate-700">
+              <th class="pb-2 pr-4">Date</th>
+              <th class="pb-2 pr-4">Type</th>
+              <th class="pb-2 pr-4">D&eacute;tails</th>
+              <th class="pb-2 pr-4 text-right">Profit net</th>
+            </tr>
+          </thead>
+          <tbody id="top-table-body">
+            <tr><td colspan="4" class="py-4 text-center text-slate-500">Chargement...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-slate-800 mt-8 py-4 text-center text-xs text-slate-600">
+    Crypto Arbitrage Dashboard &mdash; Rafra&icirc;chissement auto toutes les 60s
+  </footer>
+
+<script>
+// --- State ---
+let currentPage = 0;
+const PAGE_SIZE = 50;
+let timelineChart = null;
+let exchangeChart = null;
+let refreshTimer = null;
+
+// --- Helpers ---
+function formatTime(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts + 'Z');
+  return d.toLocaleString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit', day: '2-digit', month: '2-digit' });
+}
+
+function formatProfit(val) {
+  if (val == null) return '--';
+  const n = parseFloat(val);
+  const cls = n >= 0 ? 'profit-positive' : 'profit-negative';
+  return `<span class="${cls}">${n >= 0 ? '+' : ''}${n.toFixed(3)}%</span>`;
+}
+
+function formatPrice(val) {
+  if (val == null) return '--';
+  const n = parseFloat(val);
+  if (n >= 1000) return n.toLocaleString('fr-FR', { maximumFractionDigits: 2 });
+  if (n >= 1) return n.toFixed(4);
+  return n.toFixed(6);
+}
+
+async function api(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+// --- Load Stats ---
+async function loadStats() {
+  try {
+    const data = await api('/api/stats');
+    document.getElementById('stat-total').textContent = data.today.total;
+    document.getElementById('stat-alltime').textContent = `Total: ${data.allTimeTotal.toLocaleString('fr-FR')}`;
+    document.getElementById('stat-avg').innerHTML = formatProfit(data.today.avgProfit);
+    document.getElementById('stat-max').innerHTML = formatProfit(data.today.maxProfit);
+    document.getElementById('stat-alerts').textContent = data.today.above2Percent;
+  } catch (e) {
+    console.error('Stats error:', e);
+  }
+}
+
+// --- Load Opportunities ---
+async function loadOpportunities() {
+  try {
+    const type = document.getElementById('filter-type').value;
+    const minProfit = document.getElementById('filter-profit').value;
+    const offset = currentPage * PAGE_SIZE;
+
+    let url = `/api/opportunities?limit=${PAGE_SIZE}&offset=${offset}&min_profit=${minProfit}`;
+    if (type) url += `&type=${type}`;
+
+    const data = await api(url);
+    const tbody = document.getElementById('opp-table-body');
+
+    if (data.data.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="py-8 text-center text-slate-500">Aucune opportunit&eacute; trouv&eacute;e</td></tr>';
+    } else {
+      tbody.innerHTML = data.data.map(row => {
+        const badge = row.type === 'simple'
+          ? '<span class="badge-simple">Simple</span>'
+          : '<span class="badge-triangular">Triangulaire</span>';
+
+        let pair = row.pair || '--';
+        let exchanges = '';
+        let buyPrice = '--';
+        let sellPrice = '--';
+
+        if (row.type === 'simple') {
+          exchanges = `${row.buy_exchange} &rarr; ${row.sell_exchange}`;
+          buyPrice = formatPrice(row.buy_price);
+          sellPrice = formatPrice(row.sell_price);
+        } else {
+          exchanges = row.exchange || '--';
+          pair = row.direction || '--';
+          if (row.legs_json) {
+            try {
+              const legs = JSON.parse(row.legs_json);
+              pair = legs.map(l => l.pair).join(' &rarr; ');
+            } catch {}
+          }
+          buyPrice = '--';
+          sellPrice = '--';
+        }
+
+        return `<tr class="table-row border-b border-slate-800 transition-colors">
+          <td class="py-2 pr-4 text-slate-400">${formatTime(row.created_at)}</td>
+          <td class="py-2 pr-4">${badge}</td>
+          <td class="py-2 pr-4 font-mono text-xs">${pair}</td>
+          <td class="py-2 pr-4">${exchanges}</td>
+          <td class="py-2 pr-4 font-mono text-xs">${buyPrice}</td>
+          <td class="py-2 pr-4 font-mono text-xs">${sellPrice}</td>
+          <td class="py-2 pr-4 text-right font-mono">${formatProfit(row.net_profit_percent)}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    document.getElementById('opp-count').textContent =
+      `${Math.min(offset + 1, data.total)}-${Math.min(offset + PAGE_SIZE, data.total)} sur ${data.total}`;
+
+    document.getElementById('btn-prev').disabled = currentPage === 0;
+    document.getElementById('btn-next').disabled = (offset + PAGE_SIZE) >= data.total;
+  } catch (e) {
+    console.error('Opportunities error:', e);
+  }
+}
+
+function changePage(dir) {
+  currentPage = Math.max(0, currentPage + dir);
+  loadOpportunities();
+}
+
+// --- Load Timeline Chart ---
+async function loadTimeline() {
+  try {
+    const data = await api('/api/chart/timeline');
+
+    const labels = data.map(r => {
+      const d = new Date(r.hour + 'Z');
+      return d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' }) + ' ' +
+             d.toLocaleTimeString('fr-FR', { hour: '2-digit' }) + 'h';
+    });
+    const counts = data.map(r => r.count);
+    const profits = data.map(r => r.avg_profit);
+
+    if (timelineChart) timelineChart.destroy();
+
+    const ctx = document.getElementById('timelineChart').getContext('2d');
+    timelineChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Opportunit\u00e9s',
+            data: counts,
+            backgroundColor: 'rgba(59, 130, 246, 0.5)',
+            borderColor: 'rgba(59, 130, 246, 1)',
+            borderWidth: 1,
+            yAxisID: 'y',
+          },
+          {
+            label: 'Profit moyen %',
+            data: profits,
+            type: 'line',
+            borderColor: 'rgba(74, 222, 128, 1)',
+            backgroundColor: 'rgba(74, 222, 128, 0.1)',
+            pointRadius: 0,
+            borderWidth: 2,
+            fill: true,
+            yAxisID: 'y1',
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { color: '#94a3b8', font: { size: 11 } } }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#64748b', maxTicksLimit: 14, font: { size: 10 } },
+            grid: { color: '#1e293b' }
+          },
+          y: {
+            position: 'left',
+            ticks: { color: '#64748b', font: { size: 10 } },
+            grid: { color: '#1e293b' },
+            title: { display: true, text: 'Nombre', color: '#64748b' }
+          },
+          y1: {
+            position: 'right',
+            ticks: { color: '#4ade80', font: { size: 10 } },
+            grid: { display: false },
+            title: { display: true, text: 'Profit %', color: '#4ade80' }
+          }
+        }
+      }
+    });
+  } catch (e) {
+    console.error('Timeline error:', e);
+  }
+}
+
+// --- Load Exchange Chart ---
+async function loadExchangeChart() {
+  try {
+    const data = await api('/api/chart/exchanges');
+    const entries = data.bestByExchange || [];
+
+    const labels = entries.map(e => e.exchange);
+    const maxProfits = entries.map(e => e.max_profit);
+    const totalOpps = entries.map(e => e.total_opps);
+
+    if (exchangeChart) exchangeChart.destroy();
+
+    const ctx = document.getElementById('exchangeChart').getContext('2d');
+    exchangeChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Max profit %',
+            data: maxProfits,
+            backgroundColor: [
+              'rgba(250, 204, 21, 0.7)',
+              'rgba(59, 130, 246, 0.7)',
+              'rgba(168, 85, 247, 0.7)',
+              'rgba(249, 115, 22, 0.7)',
+            ],
+            borderWidth: 0,
+            yAxisID: 'y',
+          },
+          {
+            label: 'Total opportunit\u00e9s',
+            data: totalOpps,
+            type: 'line',
+            borderColor: 'rgba(148, 163, 184, 0.8)',
+            pointBackgroundColor: '#94a3b8',
+            pointRadius: 4,
+            borderWidth: 2,
+            fill: false,
+            yAxisID: 'y1',
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { labels: { color: '#94a3b8', font: { size: 11 } } }
+        },
+        scales: {
+          x: {
+            ticks: { color: '#94a3b8' },
+            grid: { color: '#1e293b' }
+          },
+          y: {
+            position: 'left',
+            ticks: { color: '#facc15', font: { size: 10 } },
+            grid: { color: '#1e293b' },
+            title: { display: true, text: 'Max profit %', color: '#facc15' }
+          },
+          y1: {
+            position: 'right',
+            ticks: { color: '#94a3b8', font: { size: 10 } },
+            grid: { display: false },
+            title: { display: true, text: 'Opportunit\u00e9s', color: '#94a3b8' }
+          }
+        }
+      }
+    });
+  } catch (e) {
+    console.error('Exchange chart error:', e);
+  }
+}
+
+// --- Load Scans ---
+async function loadScans() {
+  try {
+    const data = await api('/api/scans');
+    const container = document.getElementById('scans-list');
+
+    if (data.length === 0) {
+      container.innerHTML = '<p class="text-slate-500 text-sm">Aucun scan r&eacute;cent</p>';
+      return;
+    }
+
+    container.innerHTML = data.slice(0, 5).map((scan, i) => {
+      const time = formatTime(scan.timestamp);
+      const profitHtml = formatProfit(scan.best_profit);
+      const statusDot = i === 0
+        ? '<span class="w-2 h-2 rounded-full bg-green-400 inline-block"></span>'
+        : '<span class="w-2 h-2 rounded-full bg-slate-600 inline-block"></span>';
+
+      return `<div class="flex items-center justify-between py-2 px-3 rounded-lg bg-slate-800/50">
+        <div class="flex items-center gap-3">
+          ${statusDot}
+          <span class="text-sm text-slate-300">${time}</span>
+        </div>
+        <div class="flex items-center gap-4 text-sm">
+          <span class="text-slate-400">${scan.opportunities_found} opp.</span>
+          <span>Best: ${profitHtml}</span>
+          <span class="text-slate-500">${scan.types}</span>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    console.error('Scans error:', e);
+  }
+}
+
+// --- Load Top ---
+async function loadTop() {
+  try {
+    const data = await api('/api/top');
+    const tbody = document.getElementById('top-table-body');
+
+    if (data.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" class="py-4 text-center text-slate-500">Aucune donn&eacute;e</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = data.map(row => {
+      const badge = row.type === 'simple'
+        ? '<span class="badge-simple">Simple</span>'
+        : '<span class="badge-triangular">Triangulaire</span>';
+
+      let details = '';
+      if (row.type === 'simple') {
+        details = `${row.pair} : ${row.buy_exchange} &rarr; ${row.sell_exchange}`;
+      } else {
+        details = row.exchange || '';
+        if (row.legs_json) {
+          try {
+            const legs = JSON.parse(row.legs_json);
+            details += ' : ' + legs.map(l => l.pair).join(' &rarr; ');
+          } catch {}
+        }
+      }
+
+      return `<tr class="table-row border-b border-slate-800">
+        <td class="py-2 pr-4 text-slate-400">${formatTime(row.created_at)}</td>
+        <td class="py-2 pr-4">${badge}</td>
+        <td class="py-2 pr-4 text-sm">${details}</td>
+        <td class="py-2 pr-4 text-right font-mono font-bold">${formatProfit(row.net_profit_percent)}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    console.error('Top error:', e);
+  }
+}
+
+// --- Refresh all ---
+async function refreshAll() {
+  document.getElementById('last-update').textContent =
+    'Mise \u00e0 jour: ' + new Date().toLocaleTimeString('fr-FR');
+  await Promise.all([
+    loadStats(),
+    loadOpportunities(),
+    loadTimeline(),
+    loadExchangeChart(),
+    loadScans(),
+    loadTop(),
+  ]);
+}
+
+// --- Init ---
+refreshAll();
+refreshTimer = setInterval(refreshAll, 60000);
+</script>
+</body>
+</html>
