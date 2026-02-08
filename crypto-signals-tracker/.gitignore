@@ -1,0 +1,29 @@
+# Dépendances
+node_modules/
+
+# Variables d'environnement (CONTIENT DES SECRETS)
+config/.env
+
+# Base de données
+database/*.db
+database/*.db-journal
+database/*.db-wal
+
+# Session Telegram (CONTIENT VOS IDENTIFIANTS)
+*.session
+session.json
+
+# Logs
+logs/*.log
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Fichiers temporaires
+*.tmp
+*.bak

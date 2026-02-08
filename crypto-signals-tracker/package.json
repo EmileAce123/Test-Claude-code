@@ -1,0 +1,23 @@
+{
+  "name": "crypto-signals-tracker",
+  "version": "1.0.0",
+  "description": "Bot de suivi automatique des signaux de trading crypto depuis Telegram",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "setup": "node src/setup.js",
+    "stats": "node src/manual-stats.js"
+  },
+  "keywords": ["telegram", "crypto", "trading", "signals"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "telegram": "^2.26.22",
+    "input": "^1.0.1",
+    "better-sqlite3": "^11.7.0",
+    "node-cron": "^3.0.3",
+    "grammy": "^1.35.0",
+    "winston": "^3.17.0",
+    "dotenv": "^16.4.7"
+  }
+}

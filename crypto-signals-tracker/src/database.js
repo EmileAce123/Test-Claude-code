@@ -1,0 +1,448 @@
+// ============================================================
+// database.js - Gestion de la base de données SQLite
+// ============================================================
+// Ce module crée et gère la base de données locale qui stocke
+// tous les signaux de trading et leurs confirmations.
+// Utilise better-sqlite3 pour des requêtes synchrones et rapides.
+// ============================================================
+
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
+const logger = require('./logger');
+
+// Variable qui stocke l'instance de la base de données
+let db = null;
+
+/**
+ * Initialise la base de données SQLite.
+ * Crée le fichier et les tables si elles n'existent pas.
+ * @param {string} dbPath - Chemin vers le fichier de base de données
+ */
+function init(dbPath) {
+  // Créer le dossier parent si nécessaire
+  const dir = path.dirname(dbPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    logger.info(`Dossier de base de données créé : ${dir}`);
+  }
+
+  // Ouvrir ou créer la base de données
+  db = new Database(dbPath);
+  logger.info(`Base de données ouverte : ${dbPath}`);
+
+  // Activer le mode WAL pour de meilleures performances
+  // (Write-Ahead Logging = écritures plus rapides)
+  db.pragma('journal_mode = WAL');
+
+  // Créer les tables si elles n'existent pas encore
+  createTables();
+
+  logger.info('Base de données initialisée avec succès');
+}
+
+/**
+ * Crée les tables nécessaires dans la base de données.
+ * Cette fonction est idempotente (peut être appelée plusieurs fois sans problème).
+ */
+function createTables() {
+  // ---- Table des signaux de trading ----
+  // Stocke chaque signal reçu avec toutes ses informations
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- Identifiant unique du message Telegram
+      telegram_message_id INTEGER NOT NULL,
+      -- Paire de trading (ex: POL/USDT)
+      pair TEXT NOT NULL,
+      -- Direction du trade : SHORT ou LONG
+      direction TEXT NOT NULL,
+      -- Prix d'entrée minimum
+      entry_price_min REAL NOT NULL,
+      -- Prix d'entrée maximum
+      entry_price_max REAL NOT NULL,
+      -- Effet de levier (ex: 25 pour X25)
+      leverage INTEGER NOT NULL,
+      -- Prix du stop loss
+      stop_loss REAL NOT NULL,
+      -- Émetteur du signal (ex: @CryptoKlondike)
+      emitter TEXT,
+      -- Prix des 5 targets (stockés en JSON pour flexibilité)
+      targets TEXT NOT NULL,
+      -- Statut du trade : open, tp_hit, sl_hit, cancelled
+      status TEXT DEFAULT 'open',
+      -- Numéro du dernier target atteint (0 = aucun)
+      last_target_hit INTEGER DEFAULT 0,
+      -- Profit final en pourcentage (rempli quand le trade se ferme)
+      final_profit_pct REAL,
+      -- Date/heure de réception du signal
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      -- Date/heure de la dernière mise à jour
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      -- Contrainte : pas de doublon de message Telegram
+      UNIQUE(telegram_message_id)
+    )
+  `);
+
+  // ---- Table des confirmations (targets atteints) ----
+  // Stocke chaque confirmation de target reçue
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS confirmations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- Référence vers le signal parent
+      signal_id INTEGER,
+      -- Identifiant du message Telegram de confirmation
+      telegram_message_id INTEGER NOT NULL,
+      -- Paire de trading (pour matching)
+      pair TEXT NOT NULL,
+      -- Numéro du target atteint (1 à 5)
+      target_number INTEGER NOT NULL,
+      -- Pourcentage de profit affiché
+      profit_pct REAL NOT NULL,
+      -- Durée écoulée depuis l'entrée (texte brut)
+      period TEXT,
+      -- Date/heure de réception de la confirmation
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      -- Lien vers la table signals
+      FOREIGN KEY (signal_id) REFERENCES signals(id),
+      -- Pas de doublon
+      UNIQUE(telegram_message_id)
+    )
+  `);
+
+  // ---- Table des annulations ----
+  // Stocke les messages d'annulation manuelle
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cancellations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- Identifiant du message Telegram
+      telegram_message_id INTEGER NOT NULL,
+      -- Paire de trading
+      pair TEXT NOT NULL,
+      -- Date/heure de l'annulation
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(telegram_message_id)
+    )
+  `);
+
+  // ---- Table des stop loss touchés ----
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS stop_losses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      -- Référence vers le signal parent
+      signal_id INTEGER,
+      -- Identifiant du message Telegram
+      telegram_message_id INTEGER NOT NULL,
+      -- Paire de trading
+      pair TEXT NOT NULL,
+      -- Pourcentage de perte
+      loss_pct REAL,
+      -- Durée écoulée
+      period TEXT,
+      -- Date/heure
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (signal_id) REFERENCES signals(id),
+      UNIQUE(telegram_message_id)
+    )
+  `);
+
+  // ---- Table pour l'état de l'entrée en zone ----
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entry_zones (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      telegram_message_id INTEGER NOT NULL,
+      pair TEXT NOT NULL,
+      period TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(telegram_message_id)
+    )
+  `);
+
+  logger.info('Tables de la base de données vérifiées/créées');
+}
+
+// ============================================================
+// OPÉRATIONS D'ÉCRITURE
+// ============================================================
+
+/**
+ * Insère un nouveau signal de trading dans la base de données.
+ * @param {Object} signal - Les données du signal parsé
+ * @returns {Object} Le signal inséré avec son ID
+ */
+function insertSignal(signal) {
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO signals
+      (telegram_message_id, pair, direction, entry_price_min, entry_price_max,
+       leverage, stop_loss, emitter, targets, status)
+    VALUES
+      (@telegramMessageId, @pair, @direction, @entryPriceMin, @entryPriceMax,
+       @leverage, @stopLoss, @emitter, @targets, 'open')
+  `);
+
+  const result = stmt.run({
+    telegramMessageId: signal.telegramMessageId,
+    pair: signal.pair,
+    direction: signal.direction,
+    entryPriceMin: signal.entryPriceMin,
+    entryPriceMax: signal.entryPriceMax,
+    leverage: signal.leverage,
+    stopLoss: signal.stopLoss,
+    emitter: signal.emitter || null,
+    targets: JSON.stringify(signal.targets),
+  });
+
+  if (result.changes > 0) {
+    logger.info(`Signal inséré : ${signal.pair} ${signal.direction} (ID: ${result.lastInsertRowid})`);
+    return { id: result.lastInsertRowid, ...signal };
+  }
+
+  // Le signal existait déjà (doublon de message Telegram)
+  logger.warn(`Signal ignoré (doublon) : message Telegram ${signal.telegramMessageId}`);
+  return null;
+}
+
+/**
+ * Insère une confirmation de target atteint.
+ * Met aussi à jour le signal parent.
+ * @param {Object} confirmation - Les données de la confirmation parsée
+ * @returns {Object|null} La confirmation insérée ou null si doublon
+ */
+function insertConfirmation(confirmation) {
+  // Trouver le signal parent (le plus récent pour cette paire, encore ouvert)
+  const signal = db.prepare(`
+    SELECT id FROM signals
+    WHERE pair = @pair AND status = 'open'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get({ pair: confirmation.pair });
+
+  const signalId = signal ? signal.id : null;
+
+  // Insérer la confirmation
+  const stmt = db.prepare(`
+    INSERT OR IGNORE INTO confirmations
+      (signal_id, telegram_message_id, pair, target_number, profit_pct, period)
+    VALUES
+      (@signalId, @telegramMessageId, @pair, @targetNumber, @profitPct, @period)
+  `);
+
+  const result = stmt.run({
+    signalId,
+    telegramMessageId: confirmation.telegramMessageId,
+    pair: confirmation.pair,
+    targetNumber: confirmation.targetNumber,
+    profitPct: confirmation.profitPct,
+    period: confirmation.period || null,
+  });
+
+  if (result.changes > 0) {
+    // Mettre à jour le signal parent si trouvé
+    if (signalId) {
+      db.prepare(`
+        UPDATE signals
+        SET last_target_hit = MAX(last_target_hit, @targetNumber),
+            status = CASE WHEN @targetNumber >= 5 THEN 'all_tp_hit' ELSE 'tp_hit' END,
+            final_profit_pct = @profitPct,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = @signalId
+      `).run({
+        targetNumber: confirmation.targetNumber,
+        profitPct: confirmation.profitPct,
+        signalId,
+      });
+      logger.info(`Signal ${signalId} mis à jour : target ${confirmation.targetNumber} atteint (${confirmation.profitPct}%)`);
+    }
+
+    logger.info(`Confirmation insérée : ${confirmation.pair} TP${confirmation.targetNumber} +${confirmation.profitPct}%`);
+    return { id: result.lastInsertRowid, signalId, ...confirmation };
+  }
+
+  logger.warn(`Confirmation ignorée (doublon) : message Telegram ${confirmation.telegramMessageId}`);
+  return null;
+}
+
+/**
+ * Enregistre une annulation de trade.
+ * @param {Object} cancellation - Données de l'annulation
+ */
+function insertCancellation(cancellation) {
+  // Insérer dans la table des annulations
+  db.prepare(`
+    INSERT OR IGNORE INTO cancellations (telegram_message_id, pair)
+    VALUES (@telegramMessageId, @pair)
+  `).run({
+    telegramMessageId: cancellation.telegramMessageId,
+    pair: cancellation.pair,
+  });
+
+  // Mettre à jour le signal parent
+  const signal = db.prepare(`
+    SELECT id FROM signals
+    WHERE pair = @pair AND status = 'open'
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get({ pair: cancellation.pair });
+
+  if (signal) {
+    db.prepare(`
+      UPDATE signals
+      SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `).run({ id: signal.id });
+    logger.info(`Signal ${signal.id} annulé : ${cancellation.pair}`);
+  }
+}
+
+/**
+ * Enregistre un stop loss touché.
+ * @param {Object} slData - Données du stop loss
+ */
+function insertStopLoss(slData) {
+  const signal = db.prepare(`
+    SELECT id FROM signals
+    WHERE pair = @pair AND status IN ('open', 'tp_hit')
+    ORDER BY created_at DESC
+    LIMIT 1
+  `).get({ pair: slData.pair });
+
+  const signalId = signal ? signal.id : null;
+
+  db.prepare(`
+    INSERT OR IGNORE INTO stop_losses (signal_id, telegram_message_id, pair, loss_pct, period)
+    VALUES (@signalId, @telegramMessageId, @pair, @lossPct, @period)
+  `).run({
+    signalId,
+    telegramMessageId: slData.telegramMessageId,
+    pair: slData.pair,
+    lossPct: slData.lossPct || null,
+    period: slData.period || null,
+  });
+
+  if (signalId) {
+    db.prepare(`
+      UPDATE signals
+      SET status = 'sl_hit',
+          final_profit_pct = @lossPct,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = @id
+    `).run({ lossPct: slData.lossPct ? -Math.abs(slData.lossPct) : null, id: signalId });
+    logger.info(`Stop loss enregistré pour signal ${signalId} : ${slData.pair}`);
+  }
+}
+
+/**
+ * Enregistre une entrée en zone de prix.
+ * @param {Object} entryZone - Données de l'entrée en zone
+ */
+function insertEntryZone(entryZone) {
+  db.prepare(`
+    INSERT OR IGNORE INTO entry_zones (telegram_message_id, pair, period)
+    VALUES (@telegramMessageId, @pair, @period)
+  `).run({
+    telegramMessageId: entryZone.telegramMessageId,
+    pair: entryZone.pair,
+    period: entryZone.period || null,
+  });
+  logger.info(`Entrée en zone enregistrée : ${entryZone.pair}`);
+}
+
+// ============================================================
+// OPÉRATIONS DE LECTURE
+// ============================================================
+
+/**
+ * Récupère tous les signaux avec un filtre optionnel par statut.
+ * @param {string} [status] - Filtre par statut (open, tp_hit, sl_hit, cancelled)
+ * @returns {Array} Liste des signaux
+ */
+function getSignals(status) {
+  if (status) {
+    return db.prepare('SELECT * FROM signals WHERE status = ? ORDER BY created_at DESC').all(status);
+  }
+  return db.prepare('SELECT * FROM signals ORDER BY created_at DESC').all();
+}
+
+/**
+ * Récupère les signaux créés après une certaine date.
+ * @param {string} since - Date ISO (ex: '2024-01-01')
+ * @returns {Array} Liste des signaux
+ */
+function getSignalsSince(since) {
+  return db.prepare('SELECT * FROM signals WHERE created_at >= ? ORDER BY created_at DESC').all(since);
+}
+
+/**
+ * Récupère les confirmations d'un signal spécifique.
+ * @param {number} signalId - ID du signal
+ * @returns {Array} Liste des confirmations
+ */
+function getConfirmations(signalId) {
+  return db.prepare('SELECT * FROM confirmations WHERE signal_id = ? ORDER BY target_number ASC').all(signalId);
+}
+
+/**
+ * Récupère tous les signaux terminés (avec un résultat final).
+ * @returns {Array} Liste des signaux terminés
+ */
+function getClosedSignals() {
+  return db.prepare(`
+    SELECT * FROM signals
+    WHERE status IN ('tp_hit', 'all_tp_hit', 'sl_hit')
+    ORDER BY created_at DESC
+  `).all();
+}
+
+/**
+ * Récupère les signaux terminés depuis une certaine date.
+ * @param {string} since - Date ISO
+ * @returns {Array} Liste des signaux terminés
+ */
+function getClosedSignalsSince(since) {
+  return db.prepare(`
+    SELECT * FROM signals
+    WHERE status IN ('tp_hit', 'all_tp_hit', 'sl_hit')
+      AND created_at >= ?
+    ORDER BY created_at DESC
+  `).all(since);
+}
+
+/**
+ * Compte le nombre total de signaux.
+ * @returns {Object} Statistiques de comptage
+ */
+function countSignals() {
+  const total = db.prepare('SELECT COUNT(*) as count FROM signals').get().count;
+  const open = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status = 'open'").get().count;
+  const won = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status IN ('tp_hit', 'all_tp_hit')").get().count;
+  const lost = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status = 'sl_hit'").get().count;
+  const cancelled = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status = 'cancelled'").get().count;
+
+  return { total, open, won, lost, cancelled };
+}
+
+/**
+ * Ferme proprement la connexion à la base de données.
+ */
+function close() {
+  if (db) {
+    db.close();
+    logger.info('Base de données fermée proprement');
+  }
+}
+
+module.exports = {
+  init,
+  insertSignal,
+  insertConfirmation,
+  insertCancellation,
+  insertStopLoss,
+  insertEntryZone,
+  getSignals,
+  getSignalsSince,
+  getConfirmations,
+  getClosedSignals,
+  getClosedSignalsSince,
+  countSignals,
+  close,
+};
