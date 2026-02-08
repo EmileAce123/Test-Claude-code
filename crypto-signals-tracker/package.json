@@ -6,18 +6,26 @@
   "scripts": {
     "start": "node src/index.js",
     "setup": "node src/setup.js",
-    "stats": "node src/manual-stats.js"
+    "stats": "node src/manual-stats.js",
+    "dashboard": "node src/dashboard/server.js"
   },
-  "keywords": ["telegram", "crypto", "trading", "signals"],
+  "keywords": [
+    "telegram",
+    "crypto",
+    "trading",
+    "signals"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "telegram": "^2.26.22",
-    "input": "^1.0.1",
     "better-sqlite3": "^11.7.0",
-    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.7",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
     "grammy": "^1.35.0",
-    "winston": "^3.17.0",
-    "dotenv": "^16.4.7"
+    "input": "^1.0.1",
+    "node-cron": "^3.0.3",
+    "telegram": "^2.26.22",
+    "winston": "^3.17.0"
   }
 }

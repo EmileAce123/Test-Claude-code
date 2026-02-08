@@ -12,6 +12,13 @@ Bot automatique qui capture les signaux de trading crypto depuis un groupe Teleg
 - Calculs de rentabilité globale (win rate, profit cumulé, drawdown)
 - Rapports automatiques quotidiens et hebdomadaires
 - Commandes à la demande (/stats, /today, /week, /open)
+- **Dashboard web** accessible depuis internet (dark mode, responsive)
+  - Vue d'ensemble avec KPI (profit, win rate, drawdown)
+  - Graphiques interactifs (courbe de profit, performance par paire, par jour)
+  - Historique des trades avec filtres et tri
+  - Export CSV
+  - Authentification par login/password
+  - Rafraichissement automatique toutes les 30s
 
 ## Architecture
 
@@ -30,7 +37,16 @@ crypto-signals-tracker/
 │   ├── reporter.js        ← Bot Telegram pour les rapports
 │   ├── logger.js          ← Système de logs
 │   ├── setup.js           ← Assistant de configuration
-│   └── manual-stats.js    ← Stats dans le terminal
+│   ├── manual-stats.js    ← Stats dans le terminal
+│   └── dashboard/
+│       ├── server.js      ← Serveur Express (port 3001)
+│       ├── routes.js      ← Endpoints API (lecture seule)
+│       ├── auth.js        ← Authentification (login/password)
+│       └── public/
+│           ├── index.html ← Dashboard principal
+│           ├── login.html ← Page de connexion
+│           ├── style.css  ← Styles dark mode
+│           └── app.js     ← Logique frontend + Chart.js
 ├── database/
 │   └── signals.db         ← Base de données (créée automatiquement)
 ├── logs/
@@ -168,6 +184,79 @@ pm2 stop crypto-tracker       # Arrêter
 pm2 delete crypto-tracker     # Supprimer
 ```
 
+## Dashboard Web
+
+### Configuration
+
+Ajoutez ces variables dans `config/.env` :
+
+```
+DASHBOARD_PORT=3001
+DASHBOARD_USER=admin
+DASHBOARD_PASSWORD=votre_mot_de_passe_ici
+```
+
+### Lancement
+
+```bash
+# En mode test
+npm run dashboard
+
+# En mode 24/7 avec PM2 (lance tracker + dashboard)
+pm2 start ecosystem.config.js
+```
+
+Le dashboard est accessible sur `http://IP_DE_VOTRE_VPS:3001`.
+
+### Fonctionnalites
+
+- **KPI** : profit cumule, win rate, total trades, meilleur/pire trade, drawdown
+- **Graphiques** : courbe de profit dans le temps, performance par paire, par jour de la semaine, distribution des profits
+- **Tableau des trades** : filtrable par statut, paire, date. Triable par colonne
+- **Export CSV** : telechargement de tous les trades au format CSV
+- **Indicateur** : affiche si le bot Telegram est actif ou non
+- **Rafraichissement** : les donnees se mettent a jour automatiquement toutes les 30 secondes
+
+### Securite du dashboard
+
+- Authentification par login/password (definis dans `.env`)
+- Sessions cote serveur (cookie httpOnly, pas accessible par JavaScript)
+- Protection anti-bruteforce : 5 tentatives max, blocage 15 minutes
+- Comparaison des mots de passe en temps constant (anti timing-attack)
+- Aucune ecriture dans la base de donnees (lecture seule)
+
+### Reverse proxy nginx (optionnel)
+
+Pour utiliser un nom de domaine avec HTTPS :
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name tracker.votre-domaine.com;
+
+    ssl_certificate /etc/letsencrypt/live/tracker.votre-domaine.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/tracker.votre-domaine.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3001;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Pour obtenir un certificat SSL gratuit : `sudo certbot --nginx -d tracker.votre-domaine.com`
+
+### Commandes PM2 pour le dashboard
+
+```bash
+pm2 logs crypto-dashboard     # Voir les logs du dashboard
+pm2 restart crypto-dashboard  # Redemarrer le dashboard
+pm2 stop crypto-dashboard     # Arreter le dashboard
+```
+
 ## Statistiques dans le terminal
 
 Pour afficher les stats directement dans le terminal (sans Telegram) :
@@ -184,6 +273,7 @@ npm run stats
 - Lit UNIQUEMENT les messages du groupe configuré
 - Stocke les données localement dans SQLite
 - Envoie des rapports via un bot Telegram séparé
+- Expose un dashboard web protege par login/password
 
 ### Ce que le code ne fait PAS
 

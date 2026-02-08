@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard - Crypto Signals Tracker</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- ========== HEADER ========== -->
+  <header class="header">
+    <div class="header-left">
+      <h1>Crypto Signals Tracker</h1>
+      <div class="header-status">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Chargement...</span>
+      </div>
+    </div>
+    <div class="header-right">
+      <span class="last-refresh" id="lastRefresh"></span>
+      <button class="btn" onclick="refreshAll()">Rafraichir</button>
+      <a class="btn" href="/api/export-csv">Export CSV</a>
+      <button class="btn btn-logout" onclick="logout()">Deconnexion</button>
+    </div>
+  </header>
+
+  <!-- ========== CONTENU PRINCIPAL ========== -->
+  <div class="container">
+
+    <!-- ---- KPI Cards ---- -->
+    <section class="kpi-grid" id="kpiGrid">
+      <div class="kpi-card">
+        <div class="kpi-label">Profit cumule</div>
+        <div class="kpi-value neutral" id="kpiTotalProfit">--</div>
+        <div class="kpi-sub" id="kpiTotalProfitSub"></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Win Rate</div>
+        <div class="kpi-value neutral" id="kpiWinRate">--</div>
+        <div class="kpi-sub" id="kpiWinRateSub"></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total trades</div>
+        <div class="kpi-value neutral" id="kpiTotalTrades">--</div>
+        <div class="kpi-sub" id="kpiTotalTradesSub"></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Profit moyen / trade</div>
+        <div class="kpi-value neutral" id="kpiAvgProfit">--</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Meilleur trade</div>
+        <div class="kpi-value positive" id="kpiBestTrade">--</div>
+        <div class="kpi-sub" id="kpiBestTradeSub"></div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Pire trade</div>
+        <div class="kpi-value negative" id="kpiWorstTrade">--</div>
+        <div class="kpi-sub" id="kpiWorstTradeSub"></div>
+      </div>
+    </section>
+
+    <!-- ---- Graphiques ---- -->
+    <section class="charts-grid">
+      <!-- Courbe de profit cumule -->
+      <div class="chart-card full-width">
+        <div class="chart-title">Rentabilite cumulee dans le temps</div>
+        <div class="chart-container">
+          <canvas id="profitChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Performance par paire -->
+      <div class="chart-card">
+        <div class="chart-title">Performance par paire</div>
+        <div class="chart-container">
+          <canvas id="pairChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Performance par jour -->
+      <div class="chart-card">
+        <div class="chart-title">Performance par jour de la semaine</div>
+        <div class="chart-container">
+          <canvas id="dayChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Distribution des profits -->
+      <div class="chart-card">
+        <div class="chart-title">Distribution des profits</div>
+        <div class="chart-container">
+          <canvas id="distChart"></canvas>
+        </div>
+      </div>
+
+      <!-- Win/Loss par paire -->
+      <div class="chart-card">
+        <div class="chart-title">Win Rate par paire</div>
+        <div id="pairStatsContainer" style="overflow-y:auto; max-height:300px;">
+          <table class="pair-stats-table">
+            <thead>
+              <tr>
+                <th>Paire</th>
+                <th>Trades</th>
+                <th>Win Rate</th>
+                <th>Profit</th>
+              </tr>
+            </thead>
+            <tbody id="pairStatsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---- Tableau des trades ---- -->
+    <section class="trades-section">
+      <div class="trades-header">
+        <h2>Historique des trades</h2>
+        <div class="filters">
+          <select class="filter-select" id="filterStatus" onchange="loadTrades()">
+            <option value="">Tous les statuts</option>
+            <option value="open">En cours</option>
+            <option value="tp_hit">Gagnant (TP)</option>
+            <option value="all_tp_hit">Tous TP</option>
+            <option value="sl_hit">Perdant (SL)</option>
+            <option value="cancelled">Annule</option>
+          </select>
+          <select class="filter-select" id="filterPair" onchange="loadTrades()">
+            <option value="">Toutes les paires</option>
+          </select>
+          <input type="date" class="filter-input" id="filterFrom" onchange="loadTrades()">
+          <input type="date" class="filter-input" id="filterTo" onchange="loadTrades()">
+        </div>
+      </div>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th onclick="sortTrades('created_at')">Date <span class="sort-arrow">&#9650;</span></th>
+              <th onclick="sortTrades('pair')">Paire <span class="sort-arrow">&#9650;</span></th>
+              <th onclick="sortTrades('direction')">Direction <span class="sort-arrow">&#9650;</span></th>
+              <th>Entree</th>
+              <th>Leverage</th>
+              <th>Targets</th>
+              <th onclick="sortTrades('final_profit_pct')">Profit % <span class="sort-arrow">&#9650;</span></th>
+              <th>Stop Loss</th>
+              <th onclick="sortTrades('status')">Statut <span class="sort-arrow">&#9650;</span></th>
+            </tr>
+          </thead>
+          <tbody id="tradesBody"></tbody>
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      <div class="pagination" id="paginationArea">
+        <span id="paginationInfo"></span>
+        <div class="pagination-buttons">
+          <button class="page-btn" id="prevBtn" onclick="changePage(-1)">Precedent</button>
+          <button class="page-btn" id="nextBtn" onclick="changePage(1)">Suivant</button>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <!-- Chart.js depuis CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -55,5 +55,24 @@ module.exports = {
       // Fusionner les logs d'erreur et de sortie standard
       merge_logs: true,
     },
+
+    // ---- Dashboard web ----
+    {
+      name: 'crypto-dashboard',
+      script: 'src/dashboard/server.js',
+      cwd: __dirname,
+      autorestart: true,
+      restart_delay: 3000,
+      max_restarts: 10,
+      watch: false,
+      max_memory_restart: '150M',
+      env: {
+        NODE_ENV: 'production',
+      },
+      error_file: './logs/pm2-dashboard-error.log',
+      out_file: './logs/pm2-dashboard-out.log',
+      time: true,
+      merge_logs: true,
+    },
   ],
 };
