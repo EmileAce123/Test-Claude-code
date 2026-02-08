@@ -61,6 +61,47 @@
       </div>
     </section>
 
+    <!-- ---- Section Portefeuille Virtuel ---- -->
+    <section class="portfolio-section" id="portfolioSection">
+      <h2 class="section-title">Portefeuille virtuel</h2>
+      <div class="portfolio-cards">
+        <div class="stat-card">
+          <div class="stat-label">Capital actuel</div>
+          <div class="stat-value" id="portfolioCapital">--</div>
+          <div class="stat-sub" id="portfolioCapitalSub"></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">ROI</div>
+          <div class="stat-value" id="portfolioRoi">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Gain net</div>
+          <div class="stat-value" id="portfolioGain">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Frais cumules</div>
+          <div class="stat-value neutral" id="portfolioFees">--</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Win Rate (portfolio)</div>
+          <div class="stat-value" id="portfolioWinRate">--</div>
+          <div class="stat-sub" id="portfolioWinRateSub"></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Pertes consec. max</div>
+          <div class="stat-value neutral" id="portfolioMaxLosses">--</div>
+        </div>
+      </div>
+
+      <!-- Graphique evolution du capital -->
+      <div class="chart-card full-width" style="margin-top: 16px;">
+        <div class="chart-title">Evolution du capital ($)</div>
+        <div class="chart-container">
+          <canvas id="portfolioChart"></canvas>
+        </div>
+      </div>
+    </section>
+
     <!-- ---- Graphiques ---- -->
     <section class="charts-grid">
       <!-- Courbe de profit cumule -->
@@ -147,6 +188,7 @@
               <th>Targets</th>
               <th onclick="sortTrades('final_profit_pct')">Profit % <span class="sort-arrow">&#9650;</span></th>
               <th>Stop Loss</th>
+              <th onclick="sortTrades('net_profit_loss')">P&L Net ($) <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('status')">Statut <span class="sort-arrow">&#9650;</span></th>
             </tr>
           </thead>

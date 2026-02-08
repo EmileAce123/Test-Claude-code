@@ -18,6 +18,7 @@ const telegramClient = require('./telegram-client');
 const signalParser = require('./signal-parser');
 const database = require('./database');
 const reporter = require('./reporter');
+const portfolio = require('./portfolio-simulator');
 const logger = require('./logger');
 
 /**
@@ -27,15 +28,19 @@ async function main() {
   logger.info('=== Crypto Signals Tracker - Démarrage ===');
 
   // ---- Étape 1 : Initialiser la base de données ----
-  logger.info('[1/5] Initialisation de la base de données...');
+  logger.info('[1/6] Initialisation de la base de données...');
   database.init(config.database.path);
 
+  // ---- Étape 1b : Configurer le portefeuille virtuel ----
+  logger.info('[2/6] Configuration du portefeuille virtuel...');
+  portfolio.configure(config.portfolio);
+
   // ---- Étape 2 : Connexion au compte Telegram (MTProto) ----
-  logger.info('[2/5] Connexion à Telegram (votre compte)...');
+  logger.info('[3/6] Connexion à Telegram (votre compte)...');
   await telegramClient.connect(config.telegram);
 
   // ---- Étape 3 : Trouver le groupe cible ----
-  logger.info('[3/5] Recherche du groupe cible...');
+  logger.info('[4/6] Recherche du groupe cible...');
   let groupId = config.target.groupId;
   if (!groupId) {
     // Rechercher le groupe par son nom
@@ -50,12 +55,12 @@ async function main() {
   }
 
   // ---- Étape 4 : Démarrer le bot de rapports ----
-  logger.info('[4/5] Démarrage du bot de rapports...');
+  logger.info('[5/6] Démarrage du bot de rapports...');
   await reporter.init(config.bot);
   reporter.scheduleReports(config.reports);
 
   // ---- Étape 5 : Écouter les messages du groupe ----
-  logger.info('[5/5] Démarrage de l\'écoute des signaux...');
+  logger.info('[6/6] Démarrage de l\'écoute des signaux...');
   await telegramClient.listenToGroup(groupId, handleMessage);
 
   // Notification de démarrage réussi

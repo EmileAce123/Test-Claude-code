@@ -113,13 +113,27 @@ function parseSignal(text, messageId, date) {
     const entryPriceMin = parseFloat(priceMatch[1]);
     const entryPriceMax = parseFloat(priceMatch[2]);
 
-    // Extraire le leverage (ex: X25)
-    const leverageMatch = text.match(/X(\d+)\s+leverage/i);
-    if (!leverageMatch) {
-      logger.warn(`Signal ${pair} : leverage non trouvé`);
-      return null;
+    // Extraire le leverage (formats: X25, x25, 25x, leverage 25, leverage X25)
+    let leverage = 1;
+    const leveragePatterns = [
+      /X(\d+)\s+leverage/i,       // X25 leverage
+      /leverage\s+X?(\d+)/i,      // leverage 25, leverage X25
+      /(\d+)[xX]\s+leverage/i,    // 25x leverage
+      /with\s+X(\d+)/i,           // with X25
+      /[xX](\d+)/i,               // X25 n'importe ou
+      /(\d+)[xX]/i,               // 25x n'importe ou
+    ];
+    for (const pattern of leveragePatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        leverage = parseInt(match[1], 10);
+        break;
+      }
     }
-    const leverage = parseInt(leverageMatch[1], 10);
+    if (leverage <= 0) leverage = 1;
+    if (leverage === 1) {
+      logger.warn(`Signal ${pair} : leverage non trouvé, defaut X1 (spot)`);
+    }
 
     // Extraire les targets (prix de clôture)
     // Cherche tous les prix après "Close the order at the price"

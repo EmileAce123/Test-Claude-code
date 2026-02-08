@@ -19,6 +19,7 @@ const dotenv = require('dotenv');
 dotenv.config({ path: path.join(__dirname, '..', '..', 'config', '.env') });
 
 const database = require('../database');
+const portfolio = require('../portfolio-simulator');
 const logger = require('../logger');
 const auth = require('./auth');
 const apiRoutes = require('./routes');
@@ -40,6 +41,14 @@ if (!DASH_PASSWORD) {
 // ---- Initialiser la base de données ----
 database.init(DB_PATH);
 logger.info(`Dashboard : base de données ouverte (${DB_PATH})`);
+
+// ---- Configurer le portefeuille virtuel ----
+portfolio.configure({
+  startCapital: parseFloat(process.env.VIRTUAL_PORTFOLIO_START || '200'),
+  maxPositionPct: parseFloat(process.env.MAX_POSITION_SIZE_PERCENT || '10'),
+  tradingFeePct: parseFloat(process.env.TRADING_FEE_PERCENT || '0.5'),
+});
+logger.info('Dashboard : portefeuille virtuel configure');
 
 // ---- Créer le serveur Express ----
 const app = express();

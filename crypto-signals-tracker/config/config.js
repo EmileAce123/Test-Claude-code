@@ -64,5 +64,13 @@ module.exports = {
     dailyTime: process.env.DAILY_REPORT_TIME || '23:00',
     weeklyDay: parseInt(process.env.WEEKLY_REPORT_DAY || '0', 10),
     weeklyTime: process.env.WEEKLY_REPORT_TIME || '23:00',
+    portfolioTime: process.env.PORTFOLIO_REPORT_TIME || '21:59',
+  },
+
+  // Portefeuille virtuel
+  portfolio: {
+    startCapital: parseFloat(process.env.VIRTUAL_PORTFOLIO_START || '200'),
+    maxPositionPct: parseFloat(process.env.MAX_POSITION_SIZE_PERCENT || '10'),
+    tradingFeePct: parseFloat(process.env.TRADING_FEE_PERCENT || '0.5'),
   },
 };

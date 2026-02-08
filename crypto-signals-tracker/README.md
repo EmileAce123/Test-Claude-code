@@ -11,9 +11,16 @@ Bot automatique qui capture les signaux de trading crypto depuis un groupe Teleg
 - Détection des stop loss et annulations
 - Calculs de rentabilité globale (win rate, profit cumulé, drawdown)
 - Rapports automatiques quotidiens et hebdomadaires
-- Commandes à la demande (/stats, /today, /week, /open)
+- Commandes à la demande (/stats, /today, /week, /open, /portfolio)
+- **Portefeuille virtuel** : simulation avec capital, frais et leverage
+  - Capital initial configurable (defaut: 200$)
+  - Position sizing (10% du capital par trade)
+  - Frais de transaction (0.5% entree + sortie)
+  - Stop loss = liquidation de la position
+  - Recalcul retroactif de tout l'historique
 - **Dashboard web** accessible depuis internet (dark mode, responsive)
   - Vue d'ensemble avec KPI (profit, win rate, drawdown)
+  - Section portefeuille virtuel (capital, ROI, gain, frais, graphique)
   - Graphiques interactifs (courbe de profit, performance par paire, par jour)
   - Historique des trades avec filtres et tri
   - Export CSV
@@ -34,10 +41,15 @@ crypto-signals-tracker/
 │   ├── signal-parser.js   ← Parsing des messages de signaux
 │   ├── database.js        ← Gestion base de données SQLite
 │   ├── stats-calculator.js← Calculs de rentabilité
-│   ├── reporter.js        ← Bot Telegram pour les rapports
-│   ├── logger.js          ← Système de logs
-│   ├── setup.js           ← Assistant de configuration
-│   ├── manual-stats.js    ← Stats dans le terminal
+│   ├── reporter.js           ← Bot Telegram pour les rapports
+│   ├── portfolio-simulator.js← Simulation portefeuille virtuel
+│   ├── logger.js             ← Système de logs
+│   ├── setup.js              ← Assistant de configuration
+│   ├── manual-stats.js       ← Stats dans le terminal
+│   ├── scripts/
+│   │   ├── recalculate-portfolio.js ← Recalcul complet
+│   │   ├── reset-portfolio.js       ← Reinitialisation
+│   │   └── portfolio-stats.js       ← Stats dans le terminal
 │   └── dashboard/
 │       ├── server.js      ← Serveur Express (port 3001)
 │       ├── routes.js      ← Endpoints API (lecture seule)
@@ -160,17 +172,19 @@ Une fois le tracker lancé, envoyez ces commandes à votre bot sur Telegram :
 
 | Commande | Description |
 |----------|-------------|
-| `/start` | Message de bienvenue |
-| `/stats` | Statistiques globales (tous les trades) |
-| `/today` | Résumé de la journée en cours |
-| `/week`  | Résumé des 7 derniers jours |
-| `/open`  | Liste des trades en cours |
-| `/help`  | Aide |
+| `/start`     | Message de bienvenue |
+| `/stats`     | Statistiques globales (tous les trades) |
+| `/portfolio` | Portefeuille virtuel (capital, ROI, historique) |
+| `/today`     | Résumé de la journée en cours |
+| `/week`      | Résumé des 7 derniers jours |
+| `/open`      | Liste des trades en cours |
+| `/help`      | Aide |
 
 ## Rapports automatiques
 
-- **Quotidien** : chaque jour à 23h00
-- **Hebdomadaire** : chaque dimanche à 23h00
+- **Portfolio** : chaque jour à 21h59
+- **Quotidien** : chaque jour à 23h00 (inclut le resume du portefeuille)
+- **Hebdomadaire** : chaque dimanche à 23h00 (inclut le resume du portefeuille)
 
 Les horaires sont configurables dans `config/.env`.
 
@@ -256,6 +270,58 @@ pm2 logs crypto-dashboard     # Voir les logs du dashboard
 pm2 restart crypto-dashboard  # Redemarrer le dashboard
 pm2 stop crypto-dashboard     # Arreter le dashboard
 ```
+
+## Portefeuille virtuel
+
+Le portefeuille virtuel simule l'evolution d'un capital en appliquant chaque trade avec des conditions realistes.
+
+### Configuration
+
+Ajoutez ces variables dans `config/.env` :
+
+```
+VIRTUAL_PORTFOLIO_START=200        # Capital initial en $
+MAX_POSITION_SIZE_PERCENT=10       # Taille max par position (% du capital)
+TRADING_FEE_PERCENT=0.5            # Frais de transaction (%)
+PORTFOLIO_REPORT_TIME=21:59        # Heure du rapport portfolio
+```
+
+### Logique de calcul
+
+- **Position sizing** : chaque trade utilise max 10% du capital disponible
+- **Take Profit** : profit = position x leverage x (profitPct / 100), frais deduits
+- **Stop Loss** : liquidation = perte totale de la position de base + frais d'entree
+- **Frais** : 0.5% sur le montant de base a l'entree, 0.5% sur la valeur finale a la sortie
+- **Capital minimum** : le capital ne descend jamais en dessous de 0$
+
+### Scripts utilitaires
+
+```bash
+# Recalculer tout l'historique du portefeuille
+npm run recalculate-portfolio
+
+# Reinitialiser les donnees de portefeuille (sans supprimer les trades)
+npm run reset-portfolio
+
+# Afficher les stats du portefeuille dans le terminal
+npm run portfolio-stats
+```
+
+### Dashboard
+
+La section portefeuille dans le dashboard affiche :
+- Capital actuel, ROI, gain net, frais cumules
+- Win Rate et pertes consecutives max
+- Graphique d'evolution du capital dans le temps
+- Colonne P&L Net ($) dans le tableau des trades
+
+### API Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/portfolio` | Etat complet du portefeuille |
+| `GET /api/portfolio-history` | Historique pour le graphique |
+| `GET /api/portfolio/best-worst` | Top 5 meilleurs et pires trades ($) |
 
 ## Statistiques dans le terminal
 

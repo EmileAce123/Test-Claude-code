@@ -4,17 +4,21 @@
 // Tous les endpoints sont en LECTURE SEULE.
 // Aucune écriture dans la base de données.
 //
-// GET /api/stats       → Statistiques globales
-// GET /api/trades      → Liste des trades (avec filtres)
-// GET /api/chart-data  → Données pour les graphiques
-// GET /api/pairs       → Liste des paires disponibles
-// GET /api/export-csv  → Export CSV des trades
-// GET /api/health      → Statut du système
+// GET /api/stats              → Statistiques globales
+// GET /api/trades             → Liste des trades (avec filtres)
+// GET /api/chart-data         → Données pour les graphiques
+// GET /api/pairs              → Liste des paires disponibles
+// GET /api/export-csv         → Export CSV des trades
+// GET /api/health             → Statut du système
+// GET /api/portfolio          → Etat du portefeuille virtuel
+// GET /api/portfolio-history  → Historique du portefeuille
+// GET /api/portfolio/best-worst → Meilleurs et pires trades en $
 // ============================================================
 
 const express = require('express');
 const database = require('../database');
 const statsCalculator = require('../stats-calculator');
+const portfolio = require('../portfolio-simulator');
 const logger = require('../logger');
 const fs = require('fs');
 const path = require('path');
@@ -262,6 +266,48 @@ router.get('/health', (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });
+  }
+});
+
+// ---- GET /api/portfolio ----
+// Retourne l'etat actuel du portefeuille virtuel
+router.get('/portfolio', (req, res) => {
+  try {
+    const snap = portfolio.getPortfolioSnapshot();
+    res.json(snap);
+  } catch (err) {
+    logger.error(`Erreur API /portfolio : ${err.message}`);
+    res.status(500).json({ error: 'Erreur calcul du portefeuille' });
+  }
+});
+
+// ---- GET /api/portfolio-history ----
+// Retourne l'historique du portefeuille pour le graphique
+router.get('/portfolio-history', (req, res) => {
+  try {
+    const snap = portfolio.getPortfolioSnapshot();
+    // Retourner l'historique avec les points de capital
+    res.json({
+      history: snap.history,
+      initial: snap.initial,
+      current: snap.current,
+      roi: snap.roi,
+    });
+  } catch (err) {
+    logger.error(`Erreur API /portfolio-history : ${err.message}`);
+    res.status(500).json({ error: 'Erreur historique du portefeuille' });
+  }
+});
+
+// ---- GET /api/portfolio/best-worst ----
+// Retourne les 5 meilleurs et 5 pires trades en $ net
+router.get('/portfolio/best-worst', (req, res) => {
+  try {
+    const result = portfolio.getBestWorstTrades();
+    res.json(result);
+  } catch (err) {
+    logger.error(`Erreur API /portfolio/best-worst : ${err.message}`);
+    res.status(500).json({ error: 'Erreur best/worst trades' });
   }
 });
 

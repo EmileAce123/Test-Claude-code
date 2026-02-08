@@ -7,7 +7,10 @@
     "start": "node src/index.js",
     "setup": "node src/setup.js",
     "stats": "node src/manual-stats.js",
-    "dashboard": "node src/dashboard/server.js"
+    "dashboard": "node src/dashboard/server.js",
+    "recalculate-portfolio": "node src/scripts/recalculate-portfolio.js",
+    "reset-portfolio": "node src/scripts/reset-portfolio.js",
+    "portfolio-stats": "node src/scripts/portfolio-stats.js"
   },
   "keywords": [
     "telegram",

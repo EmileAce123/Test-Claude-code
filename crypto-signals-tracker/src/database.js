@@ -38,6 +38,9 @@ function init(dbPath) {
   // Créer les tables si elles n'existent pas encore
   createTables();
 
+  // Appliquer les migrations (ajout de colonnes portfolio)
+  runMigrations();
+
   logger.info('Base de données initialisée avec succès');
 }
 
@@ -159,6 +162,33 @@ function createTables() {
   `);
 
   logger.info('Tables de la base de données vérifiées/créées');
+}
+
+/**
+ * Applique les migrations pour ajouter les colonnes du portefeuille virtuel.
+ * Utilise une approche "IF NOT EXISTS" implicite via try/catch car
+ * SQLite ne supporte pas ALTER TABLE ADD COLUMN IF NOT EXISTS.
+ */
+function runMigrations() {
+  const columnsToAdd = [
+    { table: 'signals', column: 'virtual_portfolio_before', type: 'REAL' },
+    { table: 'signals', column: 'virtual_portfolio_after', type: 'REAL' },
+    { table: 'signals', column: 'position_size', type: 'REAL' },
+    { table: 'signals', column: 'trading_fees_total', type: 'REAL' },
+    { table: 'signals', column: 'net_profit_loss', type: 'REAL' },
+  ];
+
+  for (const { table, column, type } of columnsToAdd) {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      logger.info(`Migration : colonne ${column} ajoutée à ${table}`);
+    } catch (err) {
+      // La colonne existe déjà -> ignorer silencieusement
+      if (!err.message.includes('duplicate column')) {
+        logger.error(`Migration erreur ${column} : ${err.message}`);
+      }
+    }
+  }
 }
 
 // ============================================================
@@ -347,6 +377,45 @@ function insertEntryZone(entryZone) {
   logger.info(`Entrée en zone enregistrée : ${entryZone.pair}`);
 }
 
+/**
+ * Met à jour les colonnes de portefeuille virtuel d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {Object} data - Données du portefeuille
+ */
+function updateSignalPortfolio(signalId, data) {
+  db.prepare(`
+    UPDATE signals
+    SET virtual_portfolio_before = @virtualPortfolioBefore,
+        virtual_portfolio_after = @virtualPortfolioAfter,
+        position_size = @positionSize,
+        trading_fees_total = @tradingFeesTotal,
+        net_profit_loss = @netProfitLoss
+    WHERE id = @signalId
+  `).run({
+    virtualPortfolioBefore: data.virtualPortfolioBefore,
+    virtualPortfolioAfter: data.virtualPortfolioAfter,
+    positionSize: data.positionSize,
+    tradingFeesTotal: data.tradingFeesTotal,
+    netProfitLoss: data.netProfitLoss,
+    signalId,
+  });
+}
+
+/**
+ * Réinitialise les colonnes de portefeuille de tous les signaux.
+ */
+function resetPortfolioData() {
+  db.prepare(`
+    UPDATE signals
+    SET virtual_portfolio_before = NULL,
+        virtual_portfolio_after = NULL,
+        position_size = NULL,
+        trading_fees_total = NULL,
+        net_profit_loss = NULL
+  `).run();
+  logger.info('Données de portefeuille réinitialisées');
+}
+
 // ============================================================
 // OPÉRATIONS DE LECTURE
 // ============================================================
@@ -444,5 +513,7 @@ module.exports = {
   getClosedSignals,
   getClosedSignalsSince,
   countSignals,
+  updateSignalPortfolio,
+  resetPortfolioData,
   close,
 };

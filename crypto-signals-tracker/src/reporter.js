@@ -8,14 +8,16 @@
 // C'est un bot classique créé via @BotFather.
 //
 // Rapports automatiques :
+// - Portfolio à 21h59 : etat du portefeuille virtuel
 // - Quotidien à 23h00 : résumé du jour
 // - Hebdomadaire dimanche 23h00 : stats complètes
-// - Sur demande : commande /stats
+// - Sur demande : commande /stats, /portfolio
 // ============================================================
 
 const { Bot } = require('grammy');
 const cron = require('node-cron');
 const stats = require('./stats-calculator');
+const portfolio = require('./portfolio-simulator');
 const logger = require('./logger');
 
 // Variable qui stocke l'instance du bot
@@ -46,6 +48,7 @@ async function init(config) {
       '🤖 *Crypto Signals Tracker* est actif !\n\n' +
       'Commandes disponibles :\n' +
       '/stats - Statistiques globales\n' +
+      '/portfolio - Portefeuille virtuel\n' +
       '/today - Résumé du jour\n' +
       '/week - Résumé de la semaine\n' +
       '/open - Trades en cours\n' +
@@ -125,18 +128,34 @@ async function init(config) {
     }
   });
 
+  // ---- Commande /portfolio ----
+  // Etat du portefeuille virtuel a la demande
+  bot.command('portfolio', async (ctx) => {
+    if (ctx.from.id !== adminUserId) return;
+    try {
+      const snap = portfolio.getPortfolioSnapshot();
+      const msg = formatPortfolioReport(snap);
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`Erreur commande /portfolio : ${err.message}`);
+      await ctx.reply('Erreur lors du calcul du portefeuille.');
+    }
+  });
+
   // ---- Commande /help ----
   bot.command('help', async (ctx) => {
     if (ctx.from.id !== adminUserId) return;
     await ctx.reply(
       '📖 *Aide - Crypto Signals Tracker*\n\n' +
       '/stats - Statistiques globales (tous les trades)\n' +
+      '/portfolio - Portefeuille virtuel\n' +
       '/today - Résumé de la journée en cours\n' +
       '/week - Résumé des 7 derniers jours\n' +
       '/open - Liste des trades en cours\n' +
       '/help - Ce message d\'aide\n\n' +
       'Les rapports automatiques sont envoyés :\n' +
-      '• Chaque jour à 23h00\n' +
+      '• Chaque jour à 21h59 (portfolio)\n' +
+      '• Chaque jour à 23h00 (résumé)\n' +
       '• Chaque dimanche à 23h00',
       { parse_mode: 'Markdown' }
     );
@@ -149,11 +168,32 @@ async function init(config) {
 
 /**
  * Programme les rapports automatiques avec cron.
- * @param {Object} reportConfig - Configuration { dailyTime, weeklyDay, weeklyTime }
+ * @param {Object} reportConfig - Configuration { dailyTime, weeklyDay, weeklyTime, portfolioTime }
  */
 function scheduleReports(reportConfig) {
   const [dailyHour, dailyMinute] = reportConfig.dailyTime.split(':');
   const [weeklyHour, weeklyMinute] = reportConfig.weeklyTime.split(':');
+  const [portfolioHour, portfolioMinute] = (reportConfig.portfolioTime || '21:59').split(':');
+
+  // ---- Rapport portfolio à 21:59 ----
+  // Etat du portefeuille virtuel chaque jour
+  cron.schedule(`${portfolioMinute} ${portfolioHour} * * *`, async () => {
+    logger.info('Envoi du rapport portfolio automatique...');
+    try {
+      const snap = portfolio.getPortfolioSnapshot();
+      const message = formatPortfolioReport(snap);
+      await sendReport(message);
+
+      // Envoyer les alertes si necessaire
+      const alerts = portfolio.checkAlerts();
+      for (const alert of alerts) {
+        await sendReport(alert);
+      }
+    } catch (err) {
+      logger.error(`Erreur rapport portfolio : ${err.message}`);
+    }
+  });
+  logger.info(`Rapport portfolio programmé à ${reportConfig.portfolioTime || '21:59'}`);
 
   // ---- Rapport quotidien ----
   // Planifié chaque jour à l'heure configurée
@@ -163,7 +203,8 @@ function scheduleReports(reportConfig) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const periodStats = stats.calculateStatsSince(today.toISOString());
-      const message = formatDailyReport(periodStats);
+      const snap = portfolio.getPortfolioSnapshot();
+      const message = formatDailyReport(periodStats, snap);
       await sendReport(message);
     } catch (err) {
       logger.error(`Erreur rapport quotidien : ${err.message}`);
@@ -180,7 +221,8 @@ function scheduleReports(reportConfig) {
       weekAgo.setDate(weekAgo.getDate() - 7);
       const periodStats = stats.calculateStatsSince(weekAgo.toISOString());
       const globalStats = stats.calculateGlobalStats();
-      const message = formatWeeklyReport(periodStats, globalStats);
+      const snap = portfolio.getPortfolioSnapshot();
+      const message = formatWeeklyReport(periodStats, globalStats, snap);
       await sendReport(message);
     } catch (err) {
       logger.error(`Erreur rapport hebdomadaire : ${err.message}`);
@@ -248,11 +290,12 @@ function formatGlobalStats(globalStats) {
 }
 
 /**
- * Formate le rapport quotidien.
+ * Formate le rapport quotidien avec resume du portefeuille.
  * @param {Object} periodStats - Stats de la journée
+ * @param {Object} [snap] - Snapshot du portefeuille (optionnel)
  * @returns {string} Message formaté
  */
-function formatDailyReport(periodStats) {
+function formatDailyReport(periodStats, snap) {
   const today = new Date().toLocaleDateString('fr-FR', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
   });
@@ -279,16 +322,26 @@ function formatDailyReport(periodStats) {
     msg += '_Aucun trade terminé aujourd\'hui._\n';
   }
 
+  // Ajouter le resume du portefeuille si disponible
+  if (snap) {
+    msg += '\n━━━━━━━━━━━━━━━━━━━━━━\n';
+    msg += '💼 *Portefeuille :*\n';
+    msg += `  Capital : ${snap.current.toFixed(2)}$\n`;
+    msg += `  ROI : ${snap.roi > 0 ? '+' : ''}${snap.roi}%\n`;
+    msg += `  Gain : ${snap.totalGain > 0 ? '+' : ''}${snap.totalGain.toFixed(2)}$\n`;
+  }
+
   return msg;
 }
 
 /**
- * Formate le rapport hebdomadaire.
+ * Formate le rapport hebdomadaire avec resume du portefeuille.
  * @param {Object} periodStats - Stats de la semaine
  * @param {Object} [globalStats] - Stats globales (optionnel)
+ * @param {Object} [snap] - Snapshot du portefeuille (optionnel)
  * @returns {string} Message formaté
  */
-function formatWeeklyReport(periodStats, globalStats) {
+function formatWeeklyReport(periodStats, globalStats, snap) {
   let msg = '📊 *RAPPORT HEBDOMADAIRE*\n';
   msg += '━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
@@ -317,6 +370,59 @@ function formatWeeklyReport(periodStats, globalStats) {
     msg += `  Profit cumulé : ${globalStats.totalProfit > 0 ? '+' : ''}${globalStats.totalProfit}%\n`;
   }
 
+  // Ajouter le resume du portefeuille si disponible
+  if (snap) {
+    msg += '\n━━━━━━━━━━━━━━━━━━━━━━\n';
+    msg += '💼 *Portefeuille virtuel :*\n';
+    msg += `  Capital : ${snap.current.toFixed(2)}$\n`;
+    msg += `  ROI : ${snap.roi > 0 ? '+' : ''}${snap.roi}%\n`;
+    msg += `  Gain : ${snap.totalGain > 0 ? '+' : ''}${snap.totalGain.toFixed(2)}$\n`;
+    msg += `  Frais total : ${snap.totalFees.toFixed(2)}$\n`;
+  }
+
+  return msg;
+}
+
+/**
+ * Formate le rapport du portefeuille virtuel.
+ * @param {Object} snap - Snapshot du portefeuille
+ * @returns {string} Message formaté
+ */
+function formatPortfolioReport(snap) {
+  let msg = '💼 *PORTEFEUILLE VIRTUEL*\n';
+  msg += '━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+  msg += `💰 *Capital actuel :* ${snap.current.toFixed(2)}$\n`;
+  msg += `🏦 *Capital initial :* ${snap.initial.toFixed(2)}$\n\n`;
+
+  // Performance
+  const roiSign = snap.roi >= 0 ? '+' : '';
+  const gainSign = snap.totalGain >= 0 ? '+' : '';
+  msg += `📈 *ROI :* ${roiSign}${snap.roi}%\n`;
+  msg += `💵 *Gain net :* ${gainSign}${snap.totalGain.toFixed(2)}$\n`;
+  msg += `💸 *Frais cumules :* ${snap.totalFees.toFixed(2)}$\n\n`;
+
+  // Trades
+  msg += `📊 *Trades :* ${snap.totalTrades}\n`;
+  msg += `  ├ Gagnants : ${snap.winCount}\n`;
+  msg += `  ├ Perdants : ${snap.lossCount}\n`;
+  msg += `  └ Win Rate : ${snap.winRate}%\n\n`;
+
+  // Pertes consecutives
+  if (snap.maxConsecutiveLosses > 0) {
+    msg += `⚠️ Pertes consecutives max : ${snap.maxConsecutiveLosses}\n`;
+  }
+
+  // Derniers trades (5 derniers)
+  const recentTrades = snap.history.filter(h => h.trade !== null).slice(-5);
+  if (recentTrades.length > 0) {
+    msg += '\n📋 *Derniers trades :*\n';
+    for (const t of recentTrades) {
+      const sign = t.profitNet >= 0 ? '+' : '';
+      msg += `  • ${t.pair} : ${sign}${t.profitNet.toFixed(2)}$ → ${t.capital.toFixed(2)}$\n`;
+    }
+  }
+
   return msg;
 }
 
@@ -337,7 +443,7 @@ async function notifyNewSignal(signal) {
 }
 
 /**
- * Envoie une notification pour un target atteint.
+ * Envoie une notification pour un target atteint avec impact portfolio.
  * @param {Object} confirmation - Confirmation parsée
  */
 async function notifyConfirmation(confirmation) {
@@ -345,13 +451,22 @@ async function notifyConfirmation(confirmation) {
   msg += `*${confirmation.pair}* - TP${confirmation.targetNumber}\n`;
   msg += `Profit : +${confirmation.profitPct}%\n`;
   if (confirmation.period) {
-    msg += `Durée : ${confirmation.period}`;
+    msg += `Durée : ${confirmation.period}\n`;
   }
+
+  // Ajouter l'impact sur le portefeuille
+  try {
+    const snap = portfolio.getPortfolioSnapshot();
+    msg += `\n💼 Capital : ${snap.current.toFixed(2)}$ (ROI: ${snap.roi > 0 ? '+' : ''}${snap.roi}%)`;
+  } catch (err) {
+    logger.error(`Erreur calcul portfolio pour notification : ${err.message}`);
+  }
+
   await sendReport(msg);
 }
 
 /**
- * Envoie une notification pour un stop loss.
+ * Envoie une notification pour un stop loss avec impact portfolio.
  * @param {Object} slData - Données du stop loss
  */
 async function notifyStopLoss(slData) {
@@ -361,8 +476,17 @@ async function notifyStopLoss(slData) {
     msg += `Perte : -${slData.lossPct}%\n`;
   }
   if (slData.period) {
-    msg += `Durée : ${slData.period}`;
+    msg += `Durée : ${slData.period}\n`;
   }
+
+  // Ajouter l'impact sur le portefeuille
+  try {
+    const snap = portfolio.getPortfolioSnapshot();
+    msg += `\n💼 Capital : ${snap.current.toFixed(2)}$ (ROI: ${snap.roi > 0 ? '+' : ''}${snap.roi}%)`;
+  } catch (err) {
+    logger.error(`Erreur calcul portfolio pour notification : ${err.message}`);
+  }
+
   await sendReport(msg);
 }
 

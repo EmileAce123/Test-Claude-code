@@ -35,6 +35,7 @@ async function refreshAll() {
       loadStats(),
       loadTrades(),
       loadCharts(),
+      loadPortfolio(),
       checkHealth(),
     ]);
     document.getElementById('lastRefresh').textContent =
@@ -201,6 +202,129 @@ async function checkHealth() {
     document.getElementById('statusDot').className = 'status-dot';
     document.getElementById('statusText').textContent = 'Erreur connexion';
   }
+}
+
+/**
+ * Charge les donnees du portefeuille virtuel.
+ */
+async function loadPortfolio() {
+  try {
+    const response = await fetch('/api/portfolio');
+    if (response.status === 401) return;
+    const data = await response.json();
+
+    // Capital actuel
+    const capEl = document.getElementById('portfolioCapital');
+    capEl.textContent = data.current.toFixed(2) + '$';
+    capEl.className = 'stat-value ' + (data.current >= data.initial ? 'positive' : 'negative');
+    document.getElementById('portfolioCapitalSub').textContent =
+      'Initial : ' + data.initial.toFixed(2) + '$';
+
+    // ROI
+    const roiEl = document.getElementById('portfolioRoi');
+    roiEl.textContent = (data.roi >= 0 ? '+' : '') + data.roi + '%';
+    roiEl.className = 'stat-value ' + (data.roi >= 0 ? 'positive' : 'negative');
+
+    // Gain net
+    const gainEl = document.getElementById('portfolioGain');
+    gainEl.textContent = (data.totalGain >= 0 ? '+' : '') + data.totalGain.toFixed(2) + '$';
+    gainEl.className = 'stat-value ' + (data.totalGain >= 0 ? 'positive' : 'negative');
+
+    // Frais cumules
+    document.getElementById('portfolioFees').textContent = data.totalFees.toFixed(2) + '$';
+
+    // Win Rate portfolio
+    const wrEl = document.getElementById('portfolioWinRate');
+    wrEl.textContent = data.winRate + '%';
+    wrEl.className = 'stat-value ' + (data.winRate >= 50 ? 'positive' : data.winRate > 0 ? 'negative' : 'neutral');
+    document.getElementById('portfolioWinRateSub').textContent =
+      data.winCount + 'W / ' + data.lossCount + 'L';
+
+    // Pertes consecutives max
+    document.getElementById('portfolioMaxLosses').textContent = data.maxConsecutiveLosses;
+
+    // Graphique evolution du capital
+    renderPortfolioChart(data.history);
+  } catch (err) {
+    console.error('Erreur chargement portfolio :', err);
+  }
+}
+
+/**
+ * Graphique d'evolution du capital en dollars.
+ */
+function renderPortfolioChart(history) {
+  const ctx = document.getElementById('portfolioChart');
+  if (charts.portfolio) charts.portfolio.destroy();
+
+  if (!history || history.length === 0) {
+    charts.portfolio = new Chart(ctx, {
+      type: 'line',
+      data: { labels: [], datasets: [] },
+      options: { plugins: { title: { display: true, text: 'Aucune donnee', color: '#8b949e' } } },
+    });
+    return;
+  }
+
+  const labels = history.map(h => h.trade ? formatDate(h.date) : 'Debut');
+  const values = history.map(h => h.capital);
+
+  // Couleur des points selon profit/perte
+  const pointColors = history.map(h => {
+    if (h.trade === null) return '#bc8cff'; // Point de depart
+    return h.profitNet >= 0 ? '#3fb950' : '#f85149';
+  });
+
+  charts.portfolio = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Capital ($)',
+        data: values,
+        borderColor: '#bc8cff',
+        backgroundColor: 'rgba(188, 140, 255, 0.1)',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 4,
+        pointBackgroundColor: pointColors,
+        pointBorderColor: pointColors,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => 'Capital : ' + ctx.parsed.y.toFixed(2) + '$',
+            afterLabel: (ctx) => {
+              const h = history[ctx.dataIndex];
+              if (h && h.trade) {
+                const sign = h.profitNet >= 0 ? '+' : '';
+                return h.trade + '\nP&L : ' + sign + h.profitNet.toFixed(2) + '$';
+              }
+              return '';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: chartDefaults.color, maxTicksLimit: 15 },
+          grid: { color: chartDefaults.gridColor },
+        },
+        y: {
+          ticks: {
+            color: chartDefaults.color,
+            callback: (v) => v + '$',
+          },
+          grid: { color: chartDefaults.gridColor },
+        },
+      },
+    },
+  });
 }
 
 // ============================================================
@@ -454,13 +578,16 @@ function renderTrades(trades) {
   const tbody = document.getElementById('tradesBody');
 
   if (!trades || trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
     return;
   }
 
   tbody.innerHTML = trades.map(trade => {
     const targets = Array.isArray(trade.targets) ? trade.targets : [];
     const targetsHit = trade.last_target_hit || 0;
+    const pnl = trade.net_profit_loss;
+    const pnlText = pnl != null ? ((pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '$') : '--';
+    const pnlClass = pnl != null ? (pnl >= 0 ? 'profit-positive' : 'profit-negative') : '';
 
     return `
       <tr>
@@ -474,6 +601,7 @@ function renderTrades(trades) {
           ${trade.final_profit_pct != null ? formatProfit(trade.final_profit_pct) : '--'}
         </td>
         <td>$${trade.stop_loss}</td>
+        <td class="${pnlClass}">${pnlText}</td>
         <td>${statusBadge(trade.status)}</td>
       </tr>
     `;
