@@ -266,6 +266,7 @@ router.get('/health', (req, res) => {
 
     // Vérifier si le fichier PID du tracker existe (indicateur PM2)
     let trackerActive = false;
+    let lastLogLine = null;
     try {
       // Vérifier via le fichier de log s'il y a eu de l'activité récente
       const logPath = path.join(__dirname, '..', '..', 'logs', 'app.log');
@@ -273,6 +274,15 @@ router.get('/health', (req, res) => {
         const stat = fs.statSync(logPath);
         // Actif si le fichier de log a été modifié dans les 5 dernières minutes
         trackerActive = (Date.now() - stat.mtimeMs) < 5 * 60 * 1000;
+
+        // Lire les dernieres lignes du log pour le diagnostic
+        try {
+          const logContent = fs.readFileSync(logPath, 'utf-8');
+          const lines = logContent.trim().split('\n');
+          lastLogLine = lines.slice(-5).join('\n');
+        } catch (e) {
+          // Ignorer
+        }
       }
     } catch (e) {
       // Ignorer l'erreur
@@ -281,9 +291,10 @@ router.get('/health', (req, res) => {
     res.json({
       status: 'ok',
       database: 'connected',
-      signals: count.total,
+      signals: count,
       trackerActive,
       uptime: process.uptime(),
+      lastLogLine,
     });
   } catch (err) {
     res.status(500).json({ status: 'error', error: err.message });

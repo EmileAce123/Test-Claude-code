@@ -22,12 +22,53 @@ const logger = require('./logger');
 // Variable qui stocke le client Telegram
 let client = null;
 
-// Map des groupes cibles : chatId (abs) -> groupName
-// Permet de savoir de quel groupe vient chaque message
+// Map des groupes cibles : chatId -> groupName
+// Stocke PLUSIEURS formats d'ID pour chaque groupe (Bot API et MTProto)
 let targetGroupsMap = new Map();
 
 // Callback appele quand un nouveau message arrive
 let onMessageCallback = null;
+
+// Compteurs de diagnostic pour le monitoring
+let messageCounters = {
+  total: 0,         // Total de messages recus par le handler
+  matched: 0,       // Messages d'un groupe cible
+  parsed: 0,        // Messages avec du texte (envoyes au callback)
+  unmatched: 0,     // Messages d'autres chats
+  errors: 0,        // Erreurs de traitement
+  lastMessageAt: null, // Timestamp du dernier message recu
+};
+
+/**
+ * Convertit un ID de groupe Telegram en tous les formats possibles.
+ * Telegram utilise differents formats d'ID selon le contexte :
+ * - Bot API (supergroup/channel) : -100XXXXXXXXXX
+ * - MTProto (channelId)          : XXXXXXXXXX (sans le prefixe -100)
+ * - MTProto (chatId pour group)  : XXXXXXXXXX (valeur brute)
+ *
+ * @param {number|string} id - ID du groupe dans n'importe quel format
+ * @returns {number[]} Tableau de tous les formats d'ID possibles
+ */
+function getAllPossibleIds(id) {
+  const absId = Math.abs(Number(id));
+  const ids = new Set([absId]);
+
+  // Si c'est un ID Bot API de supergroup/channel (-100XXXXXXXXXX)
+  // -> ajouter l'ID MTProto (sans le prefixe 100)
+  if (absId > 1000000000000) {
+    const mtprotoId = absId - 1000000000000;
+    ids.add(mtprotoId);
+  }
+
+  // Si c'est un ID MTProto court
+  // -> ajouter le format Bot API (avec prefixe 100)
+  if (absId < 1000000000000 && absId > 0) {
+    const botApiId = absId + 1000000000000;
+    ids.add(botApiId);
+  }
+
+  return [...ids];
+}
 
 /**
  * Charge la session sauvegardee (si elle existe).
@@ -152,51 +193,113 @@ async function findGroup(groupName) {
 /**
  * Configure l'ecoute des nouveaux messages sur PLUSIEURS groupes cibles.
  * SECURITE : Filtre strict - seuls les messages des groupes cibles sont traites.
+ *
+ * IMPORTANT : Gere la conversion d'ID entre les formats Bot API et MTProto.
+ * Bot API utilise -100XXXXXXXXXX pour les supergroups/channels.
+ * MTProto (GramJS) utilise XXXXXXXXXX sans prefixe dans peerId.channelId.
+ *
  * @param {Array<{id: number, name: string}>} groups - Tableau des groupes a ecouter
  * @param {Function} callback - Fonction appelee pour chaque nouveau message
  */
 async function listenToGroups(groups, callback) {
-  // Construire la map chatId -> groupName
+  // Construire la map chatId -> groupName avec TOUS les formats d'ID possibles
   targetGroupsMap = new Map();
   for (const group of groups) {
-    const absId = Math.abs(Number(group.id));
-    targetGroupsMap.set(absId, group.name);
-    logger.info(`Groupe enregistre : "${group.name}" (ID: ${group.id}, absID: ${absId})`);
+    const possibleIds = getAllPossibleIds(group.id);
+    for (const pid of possibleIds) {
+      targetGroupsMap.set(pid, group.name);
+    }
+    logger.info(`Groupe enregistre : "${group.name}" (ID config: ${group.id}, IDs possibles: [${possibleIds.join(', ')}])`);
   }
 
   onMessageCallback = callback;
+
+  // Reset des compteurs
+  messageCounters = {
+    total: 0, matched: 0, parsed: 0, unmatched: 0, errors: 0, lastMessageAt: null,
+  };
+
+  // Log periodique des compteurs (toutes les 5 minutes)
+  const diagnosticInterval = setInterval(() => {
+    if (messageCounters.total > 0) {
+      logger.info(`[DIAGNOSTIC] Messages recus: ${messageCounters.total} | Groupes cibles: ${messageCounters.matched} | Parses: ${messageCounters.parsed} | Autres chats: ${messageCounters.unmatched} | Erreurs: ${messageCounters.errors} | Dernier: ${messageCounters.lastMessageAt || 'jamais'}`);
+    } else {
+      logger.info(`[DIAGNOSTIC] Aucun message recu depuis le demarrage. Verifiez la connexion et les groupes.`);
+    }
+  }, 5 * 60 * 1000);
+  diagnosticInterval.unref(); // Ne pas empecher l'arret du process
 
   // Ajouter un gestionnaire d'evenements pour les nouveaux messages
   client.addEventHandler(async (event) => {
     try {
       const message = event.message;
 
-      // FILTRE DE SECURITE : ignorer si ce n'est pas un groupe cible
-      if (!message || !message.peerId) return;
+      // FILTRE DE SECURITE : ignorer si ce n'est pas un message valide
+      if (!message) return;
 
-      // Recuperer l'ID du chat source
-      const chatId = message.peerId.channelId
-        ? Number(message.peerId.channelId)
-        : message.peerId.chatId
-          ? Number(message.peerId.chatId)
-          : null;
+      messageCounters.total += 1;
+      messageCounters.lastMessageAt = new Date().toISOString();
 
-      if (!chatId) return;
+      // ---- Extraction de l'ID du chat source ----
+      // GramJS peut fournir l'ID de plusieurs facons selon le type de chat
+      let chatId = null;
+      let peerType = 'unknown';
+
+      if (message.peerId) {
+        if (message.peerId.channelId) {
+          // Supergroup ou channel -> channelId est l'ID MTProto (sans -100)
+          chatId = Number(message.peerId.channelId);
+          peerType = 'channel';
+        } else if (message.peerId.chatId) {
+          // Groupe regulier
+          chatId = Number(message.peerId.chatId);
+          peerType = 'chat';
+        } else if (message.peerId.userId) {
+          // Message prive -> ignorer
+          peerType = 'user';
+          return;
+        }
+      }
+
+      // Fallback: essayer message.chatId (disponible dans certaines versions de GramJS)
+      if (!chatId && message.chatId) {
+        chatId = Math.abs(Number(message.chatId));
+        peerType = 'chatId-fallback';
+      }
+
+      if (!chatId) {
+        // Log les premiers messages sans chatId pour comprendre la structure
+        if (messageCounters.total <= 10) {
+          logger.warn(`[DIAGNOSTIC] Message #${messageCounters.total} sans chatId extractible. peerId: ${JSON.stringify(message.peerId)}`);
+        }
+        return;
+      }
+
+      const chatIdAbs = Math.abs(chatId);
 
       // Verifier que c'est bien un des groupes cibles
-      const chatIdAbs = Math.abs(chatId);
       const groupName = targetGroupsMap.get(chatIdAbs);
 
       if (!groupName) {
-        // Message d'un autre chat -> on l'ignore silencieusement
+        messageCounters.unmatched += 1;
+        // Log les 20 premiers messages non-cibles pour aider au debug
+        if (messageCounters.unmatched <= 20) {
+          const textPreview = (message.text || message.message || '').substring(0, 50);
+          logger.info(`[DIAGNOSTIC] Message d'un chat NON cible | type: ${peerType} | chatId: ${chatIdAbs} | apercu: "${textPreview}..."`);
+        }
         return;
       }
+
+      messageCounters.matched += 1;
 
       // Le message vient d'un groupe cible -> le traiter
       const text = message.text || message.message || '';
       if (!text.trim()) return; // Ignorer les messages vides (photos, etc.)
 
-      logger.debug(`Message recu de "${groupName}" : ${text.substring(0, 100)}...`);
+      messageCounters.parsed += 1;
+
+      // Log TOUJOURS les messages des groupes cibles au niveau INFO
+      logger.info(`[MESSAGE] "${groupName}" (chatId: ${chatIdAbs}) : ${text.substring(0, 150)}${text.length > 150 ? '...' : ''}`);
 
       // Appeler le callback avec les donnees du message + le nom du groupe source
       await callback({
@@ -206,12 +309,23 @@ async function listenToGroups(groups, callback) {
         sourceGroup: groupName,
       });
     } catch (err) {
+      messageCounters.errors += 1;
       logger.error(`Erreur traitement message : ${err.message}`);
+      logger.error(err.stack);
     }
   }, new NewMessage({}));
 
   const groupNames = groups.map(g => `"${g.name}"`).join(', ');
   logger.info(`Ecoute active sur ${groups.length} groupes : ${groupNames}`);
+  logger.info(`IDs enregistres dans la map : [${[...targetGroupsMap.keys()].join(', ')}]`);
+}
+
+/**
+ * Retourne les compteurs de diagnostic.
+ * @returns {Object} Compteurs de messages
+ */
+function getMessageCounters() {
+  return { ...messageCounters };
 }
 
 /**
@@ -246,6 +360,7 @@ module.exports = {
   findGroup,
   listenToGroups,
   getGroupName,
+  getMessageCounters,
   disconnect,
   isConnected,
 };

@@ -78,16 +78,24 @@ async function main() {
   await telegramClient.listenToGroups(resolvedGroups, handleMessage);
 
   // Notification de demarrage reussi
-  const groupList = resolvedGroups.map(g => `• "${g.name}"`).join('\n');
+  const groupList = resolvedGroups.map(g => `• "${g.name}" (ID: ${g.id})`).join('\n');
   await reporter.sendReport(
     '🟢 *Crypto Signals Tracker demarre !*\n\n' +
     `Groupes surveilles (${resolvedGroups.length}) :\n` +
     groupList + '\n\n' +
+    '🔧 _Diagnostic actif : les messages sont logues._\n' +
     'En attente de signaux...'
   );
 
   logger.info('=== Application demarree avec succes ! ===');
   logger.info(`Ecoute de ${resolvedGroups.length} groupes... (Ctrl+C pour arreter)`);
+
+  // Log diagnostic toutes les 30 minutes pour confirmer que l'app tourne
+  setInterval(() => {
+    const counters = telegramClient.getMessageCounters();
+    const dbCount = database.countSignals();
+    logger.info(`[HEARTBEAT] Uptime: ${Math.round(process.uptime() / 60)} min | Messages: total=${counters.total} cibles=${counters.matched} parses=${counters.parsed} | DB: ${dbCount.total} signaux (${dbCount.open} ouverts)`);
+  }, 30 * 60 * 1000).unref();
 }
 
 /**

@@ -142,6 +142,64 @@ async function init(config) {
     }
   });
 
+  // ---- Commande /diagnostic ----
+  // Affiche l'etat du systeme et les compteurs de messages
+  bot.command('diagnostic', async (ctx) => {
+    if (ctx.from.id !== adminUserId) return;
+    try {
+      const telegramClient = require('./telegram-client');
+      const database = require('./database');
+
+      const counters = telegramClient.getMessageCounters();
+      const dbCount = database.countSignals();
+      const uptime = process.uptime();
+      const uptimeStr = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m`;
+
+      let msg = '🔧 *DIAGNOSTIC SYSTEME*\n';
+      msg += '━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+      msg += `⏱ *Uptime :* ${uptimeStr}\n`;
+      msg += `🔌 *Telegram connecte :* ${telegramClient.isConnected() ? 'Oui ✅' : 'Non ❌'}\n\n`;
+
+      msg += '📨 *Messages recus :*\n';
+      msg += `  ├ Total : ${counters.total}\n`;
+      msg += `  ├ Groupes cibles : ${counters.matched}\n`;
+      msg += `  ├ Parses (texte) : ${counters.parsed}\n`;
+      msg += `  ├ Autres chats : ${counters.unmatched}\n`;
+      msg += `  └ Erreurs : ${counters.errors}\n\n`;
+
+      msg += '💾 *Base de donnees :*\n';
+      msg += `  ├ Total signaux : ${dbCount.total}\n`;
+      msg += `  ├ Ouverts : ${dbCount.open}\n`;
+      msg += `  ├ Gagnes : ${dbCount.won}\n`;
+      msg += `  ├ Perdus : ${dbCount.lost}\n`;
+      msg += `  └ Annules : ${dbCount.cancelled}\n\n`;
+
+      if (counters.lastMessageAt) {
+        msg += `📅 Dernier message : ${counters.lastMessageAt}\n`;
+      } else {
+        msg += `⚠️ _Aucun message recu depuis le demarrage_\n`;
+      }
+
+      if (counters.total === 0) {
+        msg += '\n🔴 *ATTENTION :* Aucun message recu !\n';
+        msg += 'Verifiez :\n';
+        msg += '1. La session MTProto est valide\n';
+        msg += '2. Le compte est membre des groupes\n';
+        msg += '3. Les IDs de groupes sont corrects\n';
+      } else if (counters.matched === 0 && counters.total > 0) {
+        msg += '\n🟡 *ATTENTION :* Messages recus mais aucun des groupes cibles !\n';
+        msg += 'Les IDs des groupes ne correspondent peut-etre pas.\n';
+        msg += 'Verifiez TARGET\\_GROUP\\_IDS dans .env\n';
+      }
+
+      await ctx.reply(msg, { parse_mode: 'Markdown' });
+    } catch (err) {
+      logger.error(`Erreur commande /diagnostic : ${err.message}`);
+      await ctx.reply(`Erreur diagnostic : ${err.message}`);
+    }
+  });
+
   // ---- Commande /help ----
   bot.command('help', async (ctx) => {
     if (ctx.from.id !== adminUserId) return;
@@ -152,6 +210,7 @@ async function init(config) {
       '/today - Résumé de la journée en cours\n' +
       '/week - Résumé des 7 derniers jours\n' +
       '/open - Liste des trades en cours\n' +
+      '/diagnostic - Etat du systeme et diagnostic\n' +
       '/help - Ce message d\'aide\n\n' +
       'Les rapports automatiques sont envoyés :\n' +
       '• Chaque jour à 21h59 (portfolio)\n' +
