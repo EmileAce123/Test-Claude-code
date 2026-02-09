@@ -1,16 +1,17 @@
 // ============================================================
-// index.js - Point d'entrée principal de l'application
+// index.js - Point d'entree principal de l'application
 // ============================================================
 // Ce fichier orchestre tous les modules :
 // 1. Charge la configuration
-// 2. Initialise la base de données
+// 2. Initialise la base de donnees
 // 3. Connecte le client Telegram (votre compte)
-// 4. Démarre le bot de rapports
-// 5. Programme les rapports automatiques
-// 6. Écoute les signaux sur le groupe cible
+// 4. Resout les IDs de TOUS les groupes cibles
+// 5. Demarre le bot de rapports
+// 6. Programme les rapports automatiques
+// 7. Ecoute les signaux sur TOUS les groupes simultanément
 //
-// SÉCURITÉ : Ce script ne fait que LIRE les messages.
-// Aucun message n'est jamais envoyé depuis votre compte personnel.
+// SECURITE : Ce script ne fait que LIRE les messages.
+// Aucun message n'est jamais envoye depuis votre compte personnel.
 // ============================================================
 
 const config = require('../config/config');
@@ -22,62 +23,77 @@ const portfolio = require('./portfolio-simulator');
 const logger = require('./logger');
 
 /**
- * Fonction principale - Démarre toute l'application.
+ * Fonction principale - Demarre toute l'application.
  */
 async function main() {
-  logger.info('=== Crypto Signals Tracker - Démarrage ===');
+  logger.info('=== Crypto Signals Tracker - Demarrage ===');
 
-  // ---- Étape 1 : Initialiser la base de données ----
-  logger.info('[1/6] Initialisation de la base de données...');
+  // ---- Etape 1 : Initialiser la base de donnees ----
+  logger.info('[1/6] Initialisation de la base de donnees...');
   database.init(config.database.path);
 
-  // ---- Étape 1b : Configurer le portefeuille virtuel ----
+  // ---- Etape 2 : Configurer le portefeuille virtuel ----
   logger.info('[2/6] Configuration du portefeuille virtuel...');
   portfolio.configure(config.portfolio);
 
-  // ---- Étape 2 : Connexion au compte Telegram (MTProto) ----
-  logger.info('[3/6] Connexion à Telegram (votre compte)...');
+  // ---- Etape 3 : Connexion au compte Telegram (MTProto) ----
+  logger.info('[3/6] Connexion a Telegram (votre compte)...');
   await telegramClient.connect(config.telegram);
 
-  // ---- Étape 3 : Trouver le groupe cible ----
-  logger.info('[4/6] Recherche du groupe cible...');
-  let groupId = config.target.groupId;
-  if (!groupId) {
-    // Rechercher le groupe par son nom
-    groupId = await telegramClient.findGroup(config.target.groupName);
-    if (!groupId) {
-      logger.error(`Impossible de trouver le groupe "${config.target.groupName}".`);
-      logger.error('Vérifiez que vous êtes bien membre du groupe.');
-      logger.error('Vous pouvez aussi définir TARGET_GROUP_ID manuellement dans config/.env');
-      process.exit(1);
+  // ---- Etape 4 : Resoudre les IDs de tous les groupes cibles ----
+  logger.info(`[4/6] Resolution de ${config.targets.length} groupe(s) cible(s)...`);
+  const resolvedGroups = [];
+
+  for (const group of config.targets) {
+    if (group.id) {
+      // ID deja connu depuis .env
+      resolvedGroups.push({ id: group.id, name: group.name });
+      logger.info(`  Groupe "${group.name}" -> ID ${group.id} (depuis .env)`);
+    } else {
+      // Rechercher le groupe par son nom
+      const foundId = await telegramClient.findGroup(group.name);
+      if (foundId) {
+        resolvedGroups.push({ id: foundId, name: group.name });
+        logger.info(`  Groupe "${group.name}" -> ID ${foundId} (auto-detecte)`);
+      } else {
+        logger.error(`  Groupe "${group.name}" introuvable ! Ignore.`);
+      }
     }
-    logger.info(`Groupe trouvé ! Ajoutez TARGET_GROUP_ID=${groupId} dans config/.env pour accélérer les prochains démarrages.`);
   }
 
-  // ---- Étape 4 : Démarrer le bot de rapports ----
-  logger.info('[5/6] Démarrage du bot de rapports...');
+  if (resolvedGroups.length === 0) {
+    logger.error('Aucun groupe cible resolu. Verifiez TARGET_GROUPS et TARGET_GROUP_IDS dans config/.env');
+    process.exit(1);
+  }
+
+  logger.info(`${resolvedGroups.length}/${config.targets.length} groupe(s) resolu(s)`);
+
+  // ---- Etape 5 : Demarrer le bot de rapports ----
+  logger.info('[5/6] Demarrage du bot de rapports...');
   await reporter.init(config.bot);
   reporter.scheduleReports(config.reports);
 
-  // ---- Étape 5 : Écouter les messages du groupe ----
-  logger.info('[6/6] Démarrage de l\'écoute des signaux...');
-  await telegramClient.listenToGroup(groupId, handleMessage);
+  // ---- Etape 6 : Ecouter les messages de TOUS les groupes ----
+  logger.info('[6/6] Demarrage de l\'ecoute multi-groupes...');
+  await telegramClient.listenToGroups(resolvedGroups, handleMessage);
 
-  // Notification de démarrage réussi
+  // Notification de demarrage reussi
+  const groupList = resolvedGroups.map(g => `• "${g.name}"`).join('\n');
   await reporter.sendReport(
-    '🟢 *Crypto Signals Tracker démarré !*\n\n' +
-    `Groupe surveillé : "${config.target.groupName}"\n` +
+    '🟢 *Crypto Signals Tracker demarre !*\n\n' +
+    `Groupes surveilles (${resolvedGroups.length}) :\n` +
+    groupList + '\n\n' +
     'En attente de signaux...'
   );
 
-  logger.info('=== Application démarrée avec succès ! ===');
-  logger.info('En attente de signaux... (Ctrl+C pour arrêter)');
+  logger.info('=== Application demarree avec succes ! ===');
+  logger.info(`Ecoute de ${resolvedGroups.length} groupes... (Ctrl+C pour arreter)`);
 }
 
 /**
- * Traite chaque message reçu du groupe cible.
- * Parse le message et l'enregistre dans la base de données.
- * @param {Object} message - Message Telegram { id, text, date }
+ * Traite chaque message recu d'un groupe cible.
+ * Parse le message et l'enregistre dans la base de donnees.
+ * @param {Object} message - Message Telegram { id, text, date, sourceGroup }
  */
 async function handleMessage(message) {
   try {
@@ -86,6 +102,9 @@ async function handleMessage(message) {
 
     // Si le message n'est pas reconnu, on l'ignore
     if (!parsed) return;
+
+    // Propager le nom du groupe source sur tous les types de messages
+    parsed.sourceGroup = message.sourceGroup;
 
     // Traiter selon le type de message
     switch (parsed.type) {
@@ -107,23 +126,23 @@ async function handleMessage(message) {
         break;
 
       case 'cancellation':
-        // Trade annulé manuellement
+        // Trade annule manuellement
         database.insertCancellation(parsed);
         break;
 
       case 'stop_loss':
-        // Stop loss touché
+        // Stop loss touche
         database.insertStopLoss(parsed);
         await reporter.notifyStopLoss(parsed);
         break;
 
       case 'entry_zone':
-        // Entrée en zone de prix
+        // Entree en zone de prix
         database.insertEntryZone(parsed);
         break;
 
       default:
-        logger.debug(`Type de message non géré : ${parsed.type}`);
+        logger.debug(`Type de message non gere : ${parsed.type}`);
     }
   } catch (err) {
     logger.error(`Erreur traitement message ${message.id} : ${err.message}`);
@@ -132,18 +151,18 @@ async function handleMessage(message) {
 }
 
 // ============================================================
-// GESTION DE L'ARRÊT PROPRE
+// GESTION DE L'ARRET PROPRE
 // ============================================================
 
-// Intercepter les signaux d'arrêt (Ctrl+C, kill, etc.)
+// Intercepter les signaux d'arret (Ctrl+C, kill, etc.)
 async function shutdown(signal) {
-  logger.info(`Signal d'arrêt reçu (${signal}). Fermeture propre...`);
+  logger.info(`Signal d'arret recu (${signal}). Fermeture propre...`);
 
   try {
-    // Notifier l'arrêt
-    await reporter.sendReport('🔴 *Crypto Signals Tracker arrêté.*');
+    // Notifier l'arret
+    await reporter.sendReport('🔴 *Crypto Signals Tracker arrete.*');
   } catch (err) {
-    // Ignorer les erreurs de notification lors de l'arrêt
+    // Ignorer les erreurs de notification lors de l'arret
   }
 
   // Fermer les connexions
@@ -151,28 +170,28 @@ async function shutdown(signal) {
   await reporter.stop();
   database.close();
 
-  logger.info('Application fermée proprement.');
+  logger.info('Application fermee proprement.');
   process.exit(0);
 }
 
-// Écouter les signaux d'arrêt
+// Ecouter les signaux d'arret
 process.on('SIGINT', () => shutdown('SIGINT'));   // Ctrl+C
 process.on('SIGTERM', () => shutdown('SIGTERM')); // kill
 
-// Attraper les erreurs non gérées
+// Attraper les erreurs non gerees
 process.on('uncaughtException', (err) => {
-  logger.error(`Erreur non gérée : ${err.message}`);
+  logger.error(`Erreur non geree : ${err.message}`);
   logger.error(err.stack);
-  // Ne pas quitter - PM2 va redémarrer automatiquement si nécessaire
+  // Ne pas quitter - PM2 va redemarrer automatiquement si necessaire
 });
 
 process.on('unhandledRejection', (reason) => {
-  logger.error(`Promesse rejetée non gérée : ${reason}`);
+  logger.error(`Promesse rejetee non geree : ${reason}`);
 });
 
 // ---- LANCEMENT ----
 main().catch((err) => {
-  logger.error(`Erreur fatale au démarrage : ${err.message}`);
+  logger.error(`Erreur fatale au demarrage : ${err.message}`);
   logger.error(err.stack);
   process.exit(1);
 });

@@ -323,6 +323,12 @@ tbody tr:hover {
   color: var(--text-secondary);
 }
 
+.badge-source {
+  background: rgba(188, 140, 255, 0.15);
+  color: var(--accent-purple);
+  font-size: 10px;
+}
+
 .direction-long {
   color: var(--accent-green);
   font-weight: 600;

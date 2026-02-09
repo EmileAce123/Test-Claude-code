@@ -265,11 +265,35 @@ function formatGlobalStats(globalStats) {
   msg += '━━━━━━━━━━━━━━━━━━━━━━\n\n';
 
   // Compteurs
-  msg += `📋 *Signaux reçus :* ${counts.total}\n`;
+  msg += `📋 *Signaux recus :* ${counts.total}\n`;
   msg += `  ├ En cours : ${counts.open}\n`;
   msg += `  ├ Gagnants : ${counts.won}\n`;
   msg += `  ├ Perdants : ${counts.lost}\n`;
-  msg += `  └ Annulés : ${counts.cancelled}\n\n`;
+  msg += `  └ Annules : ${counts.cancelled}\n`;
+
+  // Breakdown par groupe si disponible
+  try {
+    const database = require('./database');
+    const groups = database.getGroups();
+    if (groups.length > 1) {
+      const allSignals = database.getSignals();
+      const groupCounts = {};
+      for (const s of allSignals) {
+        const g = s.source_group_name || 'Inconnu';
+        groupCounts[g] = (groupCounts[g] || 0) + 1;
+      }
+      msg += '  📡 ';
+      msg += Object.entries(groupCounts).map(([g, c]) => {
+        // Nom court du groupe
+        const short = g.replace('CryptoMau ', '').replace(' Trading Signals', '').replace(' Signals', '');
+        return `${c} ${short}`;
+      }).join(', ');
+      msg += '\n';
+    }
+  } catch (err) {
+    // Ignorer les erreurs de comptage par groupe
+  }
+  msg += '\n';
 
   // Performance
   msg += `🎯 *Performance (${totalTrades} trades terminés) :*\n`;
@@ -431,11 +455,14 @@ function formatPortfolioReport(snap) {
  * @param {Object} signal - Signal parsé
  */
 async function notifyNewSignal(signal) {
-  let msg = `🔔 *Nouveau signal détecté !*\n\n`;
+  let msg = `🔔 *Nouveau signal detecte !*\n\n`;
   msg += `*${signal.pair}* ${signal.direction} X${signal.leverage}\n`;
-  msg += `Entrée : $${signal.entryPriceMin} - $${signal.entryPriceMax}\n`;
+  msg += `Entree : $${signal.entryPriceMin} - $${signal.entryPriceMax}\n`;
   msg += `Stop Loss : $${signal.stopLoss}\n`;
   msg += `Targets : ${signal.targets.length}\n`;
+  if (signal.sourceGroup) {
+    msg += `📡 Groupe : ${signal.sourceGroup}\n`;
+  }
   if (signal.emitter) {
     msg += `Source : ${signal.emitter}`;
   }
@@ -451,7 +478,10 @@ async function notifyConfirmation(confirmation) {
   msg += `*${confirmation.pair}* - TP${confirmation.targetNumber}\n`;
   msg += `Profit : +${confirmation.profitPct}%\n`;
   if (confirmation.period) {
-    msg += `Durée : ${confirmation.period}\n`;
+    msg += `Duree : ${confirmation.period}\n`;
+  }
+  if (confirmation.sourceGroup) {
+    msg += `📡 ${confirmation.sourceGroup}\n`;
   }
 
   // Ajouter l'impact sur le portefeuille
@@ -470,13 +500,16 @@ async function notifyConfirmation(confirmation) {
  * @param {Object} slData - Données du stop loss
  */
 async function notifyStopLoss(slData) {
-  let msg = `❌ *Stop Loss touché !*\n\n`;
+  let msg = `❌ *Stop Loss touche !*\n\n`;
   msg += `*${slData.pair}*\n`;
   if (slData.lossPct) {
     msg += `Perte : -${slData.lossPct}%\n`;
   }
   if (slData.period) {
-    msg += `Durée : ${slData.period}\n`;
+    msg += `Duree : ${slData.period}\n`;
+  }
+  if (slData.sourceGroup) {
+    msg += `📡 ${slData.sourceGroup}\n`;
   }
 
   // Ajouter l'impact sur le portefeuille

@@ -1,12 +1,13 @@
 # Crypto Signals Tracker
 
-Bot automatique qui capture les signaux de trading crypto depuis un groupe Telegram privé et analyse leur performance.
+Bot automatique qui capture les signaux de trading crypto depuis **plusieurs groupes Telegram prives** simultanément et analyse leur performance.
 
 ## Fonctionnalités
 
-- Connexion à Telegram via votre compte personnel (API MTProto)
-- Lecture seule : aucun message n'est envoyé depuis votre compte
-- Détection automatique des signaux de trading (#SIGNAL)
+- Connexion a Telegram via votre compte personnel (API MTProto)
+- **Multi-groupes** : ecoute plusieurs groupes simultanément avec UNE SEULE connexion
+- Lecture seule : aucun message n'est envoye depuis votre compte
+- Detection automatique des signaux de trading (#SIGNAL)
 - Suivi des confirmations (Take-Profit targets)
 - Détection des stop loss et annulations
 - Calculs de rentabilité globale (win rate, profit cumulé, drawdown)
@@ -22,6 +23,7 @@ Bot automatique qui capture les signaux de trading crypto depuis un groupe Teleg
   - Vue d'ensemble avec KPI (profit, win rate, drawdown)
   - Section portefeuille virtuel (capital, ROI, gain, frais, graphique)
   - Graphiques interactifs (courbe de profit, performance par paire, par jour)
+  - Filtre par groupe source (multi-groupes)
   - Historique des trades avec filtres et tri
   - Export CSV
   - Authentification par login/password
@@ -74,8 +76,8 @@ crypto-signals-tracker/
 - **Node.js v20.x** ou supérieur
 - **npm** (installé avec Node.js)
 - **PM2** (pour le fonctionnement 24/7) : `npm install -g pm2`
-- Un compte Telegram (le vôtre)
-- Être membre du groupe "CryptoMau BTC Scalp Signals"
+- Un compte Telegram (le votre)
+- Etre membre des groupes a surveiller
 
 ## Installation pas à pas
 
@@ -135,9 +137,13 @@ Ouvrez `config/.env` avec un éditeur de texte et remplissez :
 ```
 TELEGRAM_API_ID=12345678          ← Votre api_id
 TELEGRAM_API_HASH=abcdef123456    ← Votre api_hash
-TELEGRAM_PHONE=+33612345678       ← Votre numéro de téléphone
+TELEGRAM_PHONE=+33612345678       ← Votre numero de telephone
 BOT_TOKEN=123456789:ABCdef...     ← Le token de votre bot
 ADMIN_USER_ID=987654321           ← Votre user ID
+
+# Groupes a surveiller (separes par des virgules)
+TARGET_GROUPS=CryptoMau BTC Scalp Signals,CryptoMau VIP Binance Trading Signals
+TARGET_GROUP_IDS=-1001433646525,-1001306509155
 ```
 
 ### Étape 5 : Lancer la configuration initiale
@@ -147,10 +153,10 @@ npm run setup
 ```
 
 Ce script va :
-1. Vérifier votre fichier `.env`
-2. Se connecter à Telegram (vous recevrez un code de vérification)
-3. Chercher le groupe "CryptoMau BTC Scalp Signals"
-4. Afficher l'ID du groupe à ajouter dans `.env`
+1. Verifier votre fichier `.env`
+2. Se connecter a Telegram (vous recevrez un code de verification)
+3. Chercher les groupes configures dans `TARGET_GROUPS`
+4. Afficher les IDs des groupes a ajouter dans `TARGET_GROUP_IDS`
 
 ### Étape 6 : Démarrer le tracker
 
@@ -224,6 +230,8 @@ Le dashboard est accessible sur `http://IP_DE_VOTRE_VPS:3001`.
 
 ### Fonctionnalites
 
+- **Filtre par groupe** : dropdown pour filtrer les trades par groupe source
+- **Colonne Source** : affiche le groupe d'origine de chaque signal dans le tableau
 - **KPI** : profit cumule, win rate, total trades, meilleur/pire trade, drawdown
 - **Graphiques** : courbe de profit dans le temps, performance par paire, par jour de la semaine, distribution des profits
 - **Tableau des trades** : filtrable par statut, paire, date. Triable par colonne
@@ -322,6 +330,8 @@ La section portefeuille dans le dashboard affiche :
 | `GET /api/portfolio` | Etat complet du portefeuille |
 | `GET /api/portfolio-history` | Historique pour le graphique |
 | `GET /api/portfolio/best-worst` | Top 5 meilleurs et pires trades ($) |
+| `GET /api/groups` | Liste des groupes sources |
+| `GET /api/trades?group=...` | Trades filtres par groupe source |
 
 ## Statistiques dans le terminal
 
@@ -335,8 +345,8 @@ npm run stats
 
 ### Ce que fait le code
 
-- Se connecte à Telegram avec votre compte (lecture seule)
-- Lit UNIQUEMENT les messages du groupe configuré
+- Se connecte a Telegram avec votre compte (lecture seule)
+- Lit UNIQUEMENT les messages des groupes configures
 - Stocke les données localement dans SQLite
 - Envoie des rapports via un bot Telegram séparé
 - Expose un dashboard web protege par login/password
@@ -364,7 +374,43 @@ npm run stats
 3. Vous verrez "Signals Tracker" dans la liste
 4. Vous pouvez révoquer cette session à tout moment
 
-## Dépannage
+## Multi-groupes : migration depuis 2 bots separes
+
+Si vous aviez 2 bots distincts ecoutant chacun un groupe different, voici comment migrer :
+
+### Procedure
+
+```bash
+# 1. Arreter les 2 anciens bots
+pm2 delete crypto-tracker
+pm2 delete crypto-signals-binance  # ou le nom de votre 2e bot
+
+# 2. Recuperer le nouveau code
+cd crypto-signals-tracker
+git pull origin claude/telegram-signals-tracker-jZ9L0
+
+# 3. Mettre a jour config/.env
+# Remplacer TARGET_GROUP_NAME / TARGET_GROUP_ID par :
+TARGET_GROUPS=CryptoMau BTC Scalp Signals,CryptoMau VIP Binance Trading Signals
+TARGET_GROUP_IDS=-1001433646525,-1001306509155
+
+# 4. Lancer le bot unique (la migration SQL est automatique au demarrage)
+pm2 start ecosystem.config.js
+
+# 5. Verifier
+pm2 logs crypto-tracker
+# Vous devriez voir : "Ecoute active sur 2 groupes"
+```
+
+### Points importants
+
+- La colonne `source_group_name` est ajoutee automatiquement au demarrage (migration SQL)
+- Les anciens trades existants auront `source_group_name = NULL` (normal)
+- Les nouveaux trades seront tagges avec le nom du groupe source
+- Le portefeuille virtuel combine les trades de TOUS les groupes
+- Le dashboard permet de filtrer par groupe
+
+## Depannage
 
 ### "Groupe non trouvé"
 - Vérifiez que vous êtes bien membre du groupe

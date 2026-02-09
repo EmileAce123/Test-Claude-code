@@ -5,9 +5,10 @@
 // Aucune écriture dans la base de données.
 //
 // GET /api/stats              → Statistiques globales
-// GET /api/trades             → Liste des trades (avec filtres)
+// GET /api/trades             → Liste des trades (avec filtres, filtre groupe)
 // GET /api/chart-data         → Données pour les graphiques
 // GET /api/pairs              → Liste des paires disponibles
+// GET /api/groups             → Liste des groupes sources
 // GET /api/export-csv         → Export CSV des trades
 // GET /api/health             → Statut du système
 // GET /api/portfolio          → Etat du portefeuille virtuel
@@ -42,15 +43,21 @@ router.get('/stats', (req, res) => {
 // Query params :
 //   ?status=open|tp_hit|sl_hit|cancelled
 //   ?pair=POL/USDT
+//   ?group=CryptoMau BTC Scalp Signals
 //   ?from=2024-01-01
 //   ?to=2024-12-31
 //   ?page=1&limit=50
 router.get('/trades', (req, res) => {
   try {
-    const { status, pair, from, to, page = 1, limit = 50 } = req.query;
+    const { status, pair, group, from, to, page = 1, limit = 50 } = req.query;
 
-    // Récupérer tous les signaux
+    // Recuperer tous les signaux
     let signals = database.getSignals(status || undefined);
+
+    // Filtre par groupe source
+    if (group) {
+      signals = signals.filter(s => s.source_group_name === group);
+    }
 
     // Filtre par paire
     if (pair) {
@@ -58,7 +65,7 @@ router.get('/trades', (req, res) => {
       signals = signals.filter(s => s.pair === pairUpper);
     }
 
-    // Filtre par date de début
+    // Filtre par date de debut
     if (from) {
       signals = signals.filter(s => s.created_at >= from);
     }
@@ -197,14 +204,26 @@ router.get('/pairs', (req, res) => {
   }
 });
 
+// ---- GET /api/groups ----
+// Retourne la liste des groupes sources distincts
+router.get('/groups', (req, res) => {
+  try {
+    const groups = database.getGroups();
+    res.json(groups);
+  } catch (err) {
+    logger.error(`Erreur API /groups : ${err.message}`);
+    res.status(500).json({ error: 'Erreur recuperation des groupes' });
+  }
+});
+
 // ---- GET /api/export-csv ----
 // Exporte tous les trades en CSV
 router.get('/export-csv', (req, res) => {
   try {
     const signals = database.getSignals();
 
-    // En-tête CSV
-    const header = 'Date,Paire,Direction,Entrée Min,Entrée Max,Leverage,Stop Loss,Targets Atteints,Profit %,Statut\n';
+    // En-tete CSV
+    const header = 'Date,Paire,Direction,Entree Min,Entree Max,Leverage,Stop Loss,Targets Atteints,Profit %,P&L Net $,Statut,Groupe Source\n';
 
     // Lignes CSV
     const rows = signals.map(s => {
@@ -219,7 +238,9 @@ router.get('/export-csv', (req, res) => {
         s.stop_loss,
         s.last_target_hit + '/' + targets.length,
         s.final_profit_pct || 0,
+        s.net_profit_loss || 0,
         s.status,
+        '"' + (s.source_group_name || '') + '"',
       ].join(',');
     }).join('\n');
 

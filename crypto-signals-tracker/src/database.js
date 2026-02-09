@@ -171,6 +171,7 @@ function createTables() {
  */
 function runMigrations() {
   const columnsToAdd = [
+    { table: 'signals', column: 'source_group_name', type: 'TEXT' },
     { table: 'signals', column: 'virtual_portfolio_before', type: 'REAL' },
     { table: 'signals', column: 'virtual_portfolio_after', type: 'REAL' },
     { table: 'signals', column: 'position_size', type: 'REAL' },
@@ -204,10 +205,10 @@ function insertSignal(signal) {
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO signals
       (telegram_message_id, pair, direction, entry_price_min, entry_price_max,
-       leverage, stop_loss, emitter, targets, status)
+       leverage, stop_loss, emitter, targets, status, source_group_name)
     VALUES
       (@telegramMessageId, @pair, @direction, @entryPriceMin, @entryPriceMax,
-       @leverage, @stopLoss, @emitter, @targets, 'open')
+       @leverage, @stopLoss, @emitter, @targets, 'open', @sourceGroupName)
   `);
 
   const result = stmt.run({
@@ -220,6 +221,7 @@ function insertSignal(signal) {
     stopLoss: signal.stopLoss,
     emitter: signal.emitter || null,
     targets: JSON.stringify(signal.targets),
+    sourceGroupName: signal.sourceGroup || null,
   });
 
   if (result.changes > 0) {
@@ -491,6 +493,16 @@ function countSignals() {
 }
 
 /**
+ * Recupere la liste des groupes sources distincts.
+ * @returns {Array<string>} Liste des noms de groupes
+ */
+function getGroups() {
+  return db.prepare(
+    "SELECT DISTINCT source_group_name FROM signals WHERE source_group_name IS NOT NULL ORDER BY source_group_name"
+  ).all().map(r => r.source_group_name);
+}
+
+/**
  * Ferme proprement la connexion à la base de données.
  */
 function close() {
@@ -515,5 +527,6 @@ module.exports = {
   countSignals,
   updateSignalPortfolio,
   resetPortfolioData,
+  getGroups,
   close,
 };

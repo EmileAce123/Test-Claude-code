@@ -17,6 +17,7 @@ let refreshInterval = null;
 document.addEventListener('DOMContentLoaded', () => {
   refreshAll();
   loadPairFilter();
+  loadGroupFilter();
 
   // Rafraichissement automatique toutes les 30 secondes
   refreshInterval = setInterval(refreshAll, 30000);
@@ -107,12 +108,14 @@ async function loadStats() {
  */
 async function loadTrades() {
   try {
+    const group = document.getElementById('filterGroup').value;
     const status = document.getElementById('filterStatus').value;
     const pair = document.getElementById('filterPair').value;
     const from = document.getElementById('filterFrom').value;
     const to = document.getElementById('filterTo').value;
 
     const params = new URLSearchParams();
+    if (group) params.set('group', group);
     if (status) params.set('status', status);
     if (pair) params.set('pair', pair);
     if (from) params.set('from', from);
@@ -177,6 +180,30 @@ async function loadPairFilter() {
     });
   } catch (err) {
     console.error('Erreur chargement paires :', err);
+  }
+}
+
+/**
+ * Charge la liste des groupes sources pour le filtre.
+ */
+async function loadGroupFilter() {
+  try {
+    const response = await fetch('/api/groups');
+    if (response.status === 401) return;
+    const groups = await response.json();
+
+    const select = document.getElementById('filterGroup');
+    // Garder seulement la premiere option "Tous les groupes"
+    while (select.options.length > 1) select.remove(1);
+    groups.forEach(group => {
+      const opt = document.createElement('option');
+      opt.value = group;
+      // Nom court pour le dropdown
+      opt.textContent = group.replace('CryptoMau ', '').replace(' Trading Signals', '').replace(' Signals', '');
+      select.appendChild(opt);
+    });
+  } catch (err) {
+    console.error('Erreur chargement groupes :', err);
   }
 }
 
@@ -578,7 +605,7 @@ function renderTrades(trades) {
   const tbody = document.getElementById('tradesBody');
 
   if (!trades || trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
     return;
   }
 
@@ -588,6 +615,10 @@ function renderTrades(trades) {
     const pnl = trade.net_profit_loss;
     const pnlText = pnl != null ? ((pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '$') : '--';
     const pnlClass = pnl != null ? (pnl >= 0 ? 'profit-positive' : 'profit-negative') : '';
+    // Nom court du groupe source
+    const source = trade.source_group_name
+      ? trade.source_group_name.replace('CryptoMau ', '').replace(' Trading Signals', '').replace(' Signals', '')
+      : '--';
 
     return `
       <tr>
@@ -602,6 +633,7 @@ function renderTrades(trades) {
         </td>
         <td>$${trade.stop_loss}</td>
         <td class="${pnlClass}">${pnlText}</td>
+        <td><span class="badge badge-source">${source}</span></td>
         <td>${statusBadge(trade.status)}</td>
       </tr>
     `;

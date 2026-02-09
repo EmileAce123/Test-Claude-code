@@ -160,6 +160,9 @@
       <div class="trades-header">
         <h2>Historique des trades</h2>
         <div class="filters">
+          <select class="filter-select" id="filterGroup" onchange="loadTrades()">
+            <option value="">Tous les groupes</option>
+          </select>
           <select class="filter-select" id="filterStatus" onchange="loadTrades()">
             <option value="">Tous les statuts</option>
             <option value="open">En cours</option>
@@ -189,6 +192,7 @@
               <th onclick="sortTrades('final_profit_pct')">Profit % <span class="sort-arrow">&#9650;</span></th>
               <th>Stop Loss</th>
               <th onclick="sortTrades('net_profit_loss')">P&L Net ($) <span class="sort-arrow">&#9650;</span></th>
+              <th onclick="sortTrades('source_group_name')">Source <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('status')">Statut <span class="sort-arrow">&#9650;</span></th>
             </tr>
           </thead>

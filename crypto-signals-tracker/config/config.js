@@ -42,11 +42,16 @@ module.exports = {
     adminUserId: parseInt(process.env.ADMIN_USER_ID, 10),
   },
 
-  // Groupe cible à surveiller
-  target: {
-    groupName: process.env.TARGET_GROUP_NAME || 'CryptoMau BTC Scalp Signals',
-    groupId: process.env.TARGET_GROUP_ID ? parseInt(process.env.TARGET_GROUP_ID, 10) : null,
-  },
+  // Groupes cibles a surveiller (multi-groupes)
+  targets: (() => {
+    const names = (process.env.TARGET_GROUPS || 'CryptoMau BTC Scalp Signals').split(',').map(s => s.trim());
+    const ids = (process.env.TARGET_GROUP_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+    const groups = names.map((name, i) => ({
+      name,
+      id: ids[i] ? parseInt(ids[i], 10) : null,
+    }));
+    return groups;
+  })(),
 
   // Base de données
   database: {
