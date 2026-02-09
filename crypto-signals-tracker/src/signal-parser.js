@@ -4,8 +4,12 @@
 // Ce module analyse le texte des messages Telegram pour en
 // extraire les données structurées des signaux de trading.
 //
+// Formats de signaux supportes :
+// A. Format Cornix (#SIGNAL) - CryptoMau BTC Scalp
+// B. Format Binance (TP zone) - CryptoMau VIP Binance
+//
 // Types de messages reconnus :
-// 1. Nouveau signal (#SIGNAL)
+// 1. Nouveau signal (format Cornix ou Binance)
 // 2. Confirmation de target (Take-Profit target X)
 // 3. Annulation manuelle (Manually Cancelled)
 // 4. Entrée en zone (Entered entry zone)
@@ -34,7 +38,11 @@ function parseMessage(message) {
 
   // ---- Essayer de parser chaque type de message ----
 
-  // 1. Nouveau signal de trading
+  // 1a. Nouveau signal format Binance (TP zone, pas de #SIGNAL)
+  const binanceSignal = parseBinanceSignal(text, message.id, message.date);
+  if (binanceSignal) return binanceSignal;
+
+  // 1b. Nouveau signal format Cornix (#SIGNAL)
   const signal = parseSignal(text, message.id, message.date);
   if (signal) return signal;
 
@@ -75,7 +83,133 @@ function parseMessage(message) {
 // ============================================================
 
 /**
- * Parse un nouveau signal de trading.
+ * Parse un signal format Binance (CryptoMau VIP Binance Trading Signals).
+ *
+ * Format attendu :
+ * 🚀 Binance
+ * #HANA/USDT
+ * Entry zone 0.033065-0.034415
+ * TP zone 0.034759 - 0.038545 - 0.041298 - 0.04646 - 0.053343
+ * Leverage 10x
+ * Direction : LONG
+ *
+ * Variantes possibles :
+ * - Avec ou sans emoji au debut
+ * - SL optionnel (ex: "SL 0.030" ou "Stop loss 0.030")
+ * - Direction avant ou apres le leverage
+ *
+ * @param {string} text - Texte du message
+ * @param {number} messageId - ID du message Telegram
+ * @param {Date} date - Date du message
+ * @returns {Object|null} Signal parsé ou null
+ */
+function parseBinanceSignal(text, messageId, date) {
+  // Detection : #PAIR/USDT + Entry zone + Leverage + Direction
+  const hasPair = /#([A-Z0-9]+\/[A-Z0-9]+)/i.test(text);
+  const hasEntry = /entry\s+zone/i.test(text);
+  const hasLeverage = /leverage/i.test(text);
+  const hasDirection = /direction/i.test(text);
+
+  if (!hasPair || !hasEntry || !hasLeverage || !hasDirection) return null;
+
+  try {
+    // ---- Extraire la paire (ex: #HANA/USDT) ----
+    const pairMatch = text.match(/#([A-Z0-9]+\/[A-Z0-9]+)/i);
+    const pair = pairMatch[1].toUpperCase();
+
+    // ---- Extraire la direction ----
+    const dirMatch = text.match(/direction\s*[:=]?\s*(LONG|SHORT|BUY|SELL)/i);
+    if (!dirMatch) {
+      logger.warn(`[PARSER-BINANCE] Signal ${pair} : direction non trouvee`);
+      return null;
+    }
+    const dirVal = dirMatch[1].toUpperCase();
+    const direction = (dirVal === 'BUY') ? 'LONG' : (dirVal === 'SELL') ? 'SHORT' : dirVal;
+
+    // ---- Extraire l'entry zone (ex: "Entry zone 0.033065-0.034415") ----
+    const entryMatch = text.match(/entry\s+zone\s+\$?([\d.]+)\s*[-–]\s*\$?([\d.]+)/i);
+    if (!entryMatch) {
+      logger.warn(`[PARSER-BINANCE] Signal ${pair} : entry zone non trouvee`);
+      return null;
+    }
+    const entryPriceMin = parseFloat(entryMatch[1]);
+    const entryPriceMax = parseFloat(entryMatch[2]);
+
+    // ---- Extraire les targets depuis "TP zone" ----
+    // Format : "TP zone 0.034759 - 0.038545 - 0.041298 - 0.04646"
+    const targets = [];
+    const tpZoneMatch = text.match(/TP\s+zone\s+([\d.\s\-–]+)/i);
+    if (tpZoneMatch) {
+      const tpString = tpZoneMatch[1].trim();
+      // Separer par tiret entoure d'espaces (pour ne pas confondre avec les decimales)
+      const tpParts = tpString.split(/\s+[-–]\s+/);
+      for (const part of tpParts) {
+        const price = parseFloat(part.trim());
+        if (!isNaN(price) && price > 0) {
+          targets.push(price);
+        }
+      }
+    }
+
+    if (targets.length === 0) {
+      logger.warn(`[PARSER-BINANCE] Signal ${pair} : aucun target TP zone trouve`);
+      return null;
+    }
+
+    // ---- Extraire le leverage (ex: "Leverage 10x") ----
+    let leverage = 1;
+    const levMatch = text.match(/leverage\s+(\d+)\s*x/i) || text.match(/leverage\s+x(\d+)/i);
+    if (levMatch) {
+      leverage = parseInt(levMatch[1], 10);
+    }
+    if (leverage <= 0) leverage = 1;
+
+    // ---- Extraire le stop loss (optionnel pour le format Binance) ----
+    let stopLoss = 0;
+    const slPatterns = [
+      /STOP\s*LOSS\s*[:=]?\s*\$?([\d.]+)/i,
+      /\bSL\s*[:=]?\s*\$?([\d.]+)/i,
+    ];
+    for (const pattern of slPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        stopLoss = parseFloat(match[1]);
+        break;
+      }
+    }
+    if (stopLoss === 0) {
+      logger.info(`[PARSER-BINANCE] Signal ${pair} : pas de stop loss defini (format Binance)`);
+    }
+
+    // ---- Extraire l'emetteur (optionnel) ----
+    const emitterMatch = text.match(/@([A-Za-z0-9_]+)/);
+    const emitter = emitterMatch ? `@${emitterMatch[1]}` : null;
+
+    const signal = {
+      type: 'signal',
+      telegramMessageId: messageId,
+      pair,
+      direction,
+      entryPriceMin,
+      entryPriceMax,
+      leverage,
+      targets,
+      stopLoss,
+      emitter,
+      date,
+    };
+
+    logger.info(`[PARSER-BINANCE] Signal parse : ${pair} ${direction} | Entree: $${entryPriceMin}-$${entryPriceMax} | Leverage: X${leverage} | ${targets.length} targets | SL: ${stopLoss || 'aucun'}`);
+    return signal;
+  } catch (err) {
+    logger.error(`[PARSER-BINANCE] Erreur parsing : ${err.message}`);
+    logger.error(err.stack);
+    return null;
+  }
+}
+
+/**
+ * Parse un nouveau signal de trading format Cornix.
  *
  * Format attendu :
  * #SIGNAL (POL/USDT) @CryptoKlondike
