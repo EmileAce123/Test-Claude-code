@@ -1,10 +1,10 @@
 // ============================================================
 // recalculate-portfolio.js - Recalcul complet du portefeuille
 // ============================================================
-// Recalcule l'historique complet du portefeuille virtuel
-// a partir de tous les trades existants dans la BDD.
+// RESET puis recalcule l'historique complet du portefeuille
+// virtuel a partir de tous les trades existants dans la BDD.
 //
-// Usage : npm run recalculate-portfolio
+// Usage : node src/scripts/recalculate-portfolio.js
 // ============================================================
 
 const config = require('../../config/config');
@@ -19,10 +19,15 @@ database.init(config.database.path);
 // Configurer le simulateur
 portfolio.configure(config.portfolio);
 
-// Recalculer tout
+// ETAPE 1 : Effacer toutes les anciennes valeurs de portefeuille
+console.log('[1/2] Reset des colonnes portfolio (efface les anciennes valeurs)...');
+database.resetPortfolioData();
+
+// ETAPE 2 : Recalculer tout depuis zero
+console.log('[2/2] Recalcul complet (profit % = leverage deja inclus)...\n');
 const result = portfolio.recalculateAll();
 
-console.log('--- Resultat ---');
+console.log('\n--- Resultat ---');
 console.log(`Capital initial : ${result.initial.toFixed(2)}$`);
 console.log(`Capital actuel  : ${result.current.toFixed(2)}$`);
 console.log(`Gain net        : ${result.totalGain >= 0 ? '+' : ''}${result.totalGain.toFixed(2)}$`);
@@ -41,6 +46,8 @@ for (const h of result.history) {
 }
 
 console.log('\n=== Recalcul termine ===');
+console.log('Redemarrez le dashboard pour voir les nouvelles valeurs :');
+console.log('  pm2 restart crypto-dashboard');
 
 // Fermer la BDD
 database.close();
