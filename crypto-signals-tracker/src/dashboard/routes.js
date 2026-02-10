@@ -343,4 +343,89 @@ router.get('/portfolio/best-worst', (req, res) => {
   }
 });
 
+// ---- GET /api/trades/active ----
+// Retourne les trades avec positions partiellement ouvertes
+router.get('/trades/active', (req, res) => {
+  try {
+    const activePositions = database.getActivePositions();
+    const formatted = activePositions.map(s => {
+      const executions = database.getTradeExecutions(s.id);
+      const targetsHit = executions.filter(e => e.target_number > 0).map(e => `TP${e.target_number}`);
+      return {
+        ...s,
+        targets: JSON.parse(s.targets),
+        executions,
+        targetsHitList: targetsHit,
+        positionClosedPercent: 100 - (s.position_remaining_percent || 100),
+      };
+    });
+    res.json(formatted);
+  } catch (err) {
+    logger.error(`Erreur API /trades/active : ${err.message}`);
+    res.status(500).json({ error: 'Erreur recuperation positions actives' });
+  }
+});
+
+// ---- GET /api/trades/:id/executions ----
+// Retourne les executions pyramidales d'un trade
+router.get('/trades/:id/executions', (req, res) => {
+  try {
+    const signalId = parseInt(req.params.id, 10);
+    if (isNaN(signalId)) {
+      return res.status(400).json({ error: 'ID invalide' });
+    }
+
+    const signal = database.getSignalById(signalId);
+    if (!signal) {
+      return res.status(404).json({ error: 'Signal non trouve' });
+    }
+
+    const executions = database.getTradeExecutions(signalId);
+
+    res.json({
+      signal: {
+        ...signal,
+        targets: JSON.parse(signal.targets),
+      },
+      executions,
+    });
+  } catch (err) {
+    logger.error(`Erreur API /trades/:id/executions : ${err.message}`);
+    res.status(500).json({ error: 'Erreur recuperation executions' });
+  }
+});
+
+// ---- GET /api/portfolio/exposure ----
+// Retourne l'exposition actuelle
+router.get('/portfolio/exposure', (req, res) => {
+  try {
+    const activePositions = database.getActivePositions();
+    const exposure = database.getOpenExposure();
+    const snap = portfolio.getPortfolioSnapshot();
+
+    res.json({
+      exposure: Math.round(exposure * 100) / 100,
+      activeCount: activePositions.length,
+      capitalBase: snap.current,
+      profitRealized: activePositions.reduce((sum, s) => sum + (s.profit_realized_total || 0), 0),
+      profitLatent: activePositions.reduce((sum, s) => sum + (s.profit_latent || 0), 0),
+      positions: activePositions.map(s => ({
+        id: s.id,
+        pair: s.pair,
+        direction: s.direction,
+        leverage: s.leverage,
+        positionInitial: s.position_size_initial,
+        remainingPercent: s.position_remaining_percent,
+        remainingSize: s.position_remaining_size,
+        profitRealized: s.profit_realized_total,
+        profitLatent: s.profit_latent,
+        pnlTotal: s.pnl_total,
+      })),
+    });
+  } catch (err) {
+    logger.error(`Erreur API /portfolio/exposure : ${err.message}`);
+    res.status(500).json({ error: 'Erreur calcul exposition' });
+  }
+});
+
 module.exports = router;

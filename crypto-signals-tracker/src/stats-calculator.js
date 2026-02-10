@@ -37,8 +37,8 @@ function calculateGlobalStats() {
   }
 
   // Séparer les trades gagnants et perdants
-  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit'].includes(s.status));
-  const losses = closedSignals.filter(s => s.status === 'sl_hit');
+  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit', 'closed', 'partial'].includes(s.status));
+  const losses = closedSignals.filter(s => ['sl_hit', 'stopped'].includes(s.status));
 
   // ---- Win Rate ----
   // Pourcentage de trades gagnants sur le total des trades terminés
@@ -114,8 +114,8 @@ function calculateStatsSince(since) {
     };
   }
 
-  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit'].includes(s.status));
-  const losses = closedSignals.filter(s => s.status === 'sl_hit');
+  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit', 'closed', 'partial'].includes(s.status));
+  const losses = closedSignals.filter(s => ['sl_hit', 'stopped'].includes(s.status));
   const totalTrades = wins.length + losses.length;
   const winRate = totalTrades > 0 ? (wins.length / totalTrades) * 100 : 0;
 
@@ -171,7 +171,7 @@ function calculateTradeProfit(signal) {
   // Prix moyen d'entrée
   const entryPrice = (signal.entry_price_min + signal.entry_price_max) / 2;
 
-  if (signal.status === 'sl_hit') {
+  if (['sl_hit', 'stopped'].includes(signal.status)) {
     // Stop loss touché -> calculer la perte avec le leverage
     const priceDiff = signal.direction === 'SHORT'
       ? signal.stop_loss - entryPrice  // SHORT : perte si le prix monte
@@ -180,7 +180,7 @@ function calculateTradeProfit(signal) {
     return -Math.abs(lossPct);
   }
 
-  if (['tp_hit', 'all_tp_hit'].includes(signal.status)) {
+  if (['tp_hit', 'all_tp_hit', 'closed', 'partial'].includes(signal.status)) {
     // Target atteint -> calculer le profit du premier target
     const targets = JSON.parse(signal.targets);
     if (targets.length > 0) {

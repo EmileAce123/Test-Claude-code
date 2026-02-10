@@ -161,6 +161,22 @@ function createTables() {
     )
   `);
 
+  // ---- Table des executions pyramidales (multi-TP) ----
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS trade_executions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      signal_id INTEGER NOT NULL,
+      target_number INTEGER NOT NULL,
+      target_price REAL,
+      position_closed_percent REAL,
+      position_closed_size REAL,
+      profit_realized REAL,
+      profit_realized_percent REAL,
+      executed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (signal_id) REFERENCES signals(id)
+    )
+  `);
+
   logger.info('Tables de la base de données vérifiées/créées');
 }
 
@@ -187,6 +203,13 @@ function runMigrations() {
     { table: 'signals', column: 'exit_price_real', type: 'REAL' },
     { table: 'signals', column: 'profit_real', type: 'REAL' },
     { table: 'signals', column: 'atr_value', type: 'REAL' },
+    // Colonnes pour la strategie pyramidale multi-TP
+    { table: 'signals', column: 'position_size_initial', type: 'REAL' },
+    { table: 'signals', column: 'position_remaining_percent', type: 'REAL DEFAULT 100' },
+    { table: 'signals', column: 'position_remaining_size', type: 'REAL' },
+    { table: 'signals', column: 'profit_realized_total', type: 'REAL DEFAULT 0' },
+    { table: 'signals', column: 'profit_latent', type: 'REAL' },
+    { table: 'signals', column: 'pnl_total', type: 'REAL' },
   ];
 
   for (const { table, column, type } of columnsToAdd) {
@@ -200,34 +223,26 @@ function runMigrations() {
       }
     }
   }
+
+  // Migration des anciens statuts vers les nouveaux
+  // tp_hit / all_tp_hit → closed, sl_hit → stopped
+  try {
+    const oldStatusCount = db.prepare(
+      "SELECT COUNT(*) as count FROM signals WHERE status IN ('tp_hit', 'all_tp_hit', 'sl_hit')"
+    ).get().count;
+    if (oldStatusCount > 0) {
+      db.prepare("UPDATE signals SET status = 'closed' WHERE status IN ('tp_hit', 'all_tp_hit')").run();
+      db.prepare("UPDATE signals SET status = 'stopped' WHERE status = 'sl_hit'").run();
+      logger.info(`Migration : ${oldStatusCount} statuts migres (tp_hit/all_tp_hit → closed, sl_hit → stopped)`);
+    }
+  } catch (err) {
+    logger.error(`Migration statuts erreur : ${err.message}`);
+  }
 }
 
 // ============================================================
-// MARGE DE SECURITE SUR LE PROFIT TELEGRAM
+// DONNEES BINANCE (prix reels)
 // ============================================================
-// Approche conservatrice : on utilise le profit % de Telegram
-// avec une marge de securite de 15% pour tenir compte de :
-// - Latence d'execution (1-3s entre signal et trade reel)
-// - Slippage possible (2-5%)
-// - Conditions de marche variables
-//
-// Gains : reduits de 15% (× 0.85)
-// Pertes : amplifiees de 15% (× 1.15)
-// ============================================================
-
-const SAFETY_MARGIN_GAINS = 0.85;   // -15% sur les gains
-const SAFETY_MARGIN_LOSSES = 1.15;  // +15% sur les pertes
-
-/**
- * Met a jour profit_calculated d'un signal.
- * @param {number} signalId - ID du signal
- * @param {number} profitCalculated - Profit calcule en % (avec marge)
- */
-function updateSignalProfitCalculated(signalId, profitCalculated) {
-  db.prepare(`
-    UPDATE signals SET profit_calculated = @profitCalculated WHERE id = @signalId
-  `).run({ profitCalculated, signalId });
-}
 
 /**
  * Met a jour les prix reels Binance d'un signal.
@@ -258,6 +273,139 @@ function updateSignalBinancePrices(signalId, data) {
   if (fields.length > 0) {
     db.prepare(`UPDATE signals SET ${fields.join(', ')} WHERE id = @signalId`).run(params);
   }
+}
+
+// ============================================================
+// STRATEGIE PYRAMIDALE - FONCTIONS DATA
+// ============================================================
+
+/**
+ * Initialise les colonnes pyramidales d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {number} positionSizeInitial - Taille de position initiale en $
+ */
+function initSignalPosition(signalId, positionSizeInitial) {
+  db.prepare(`
+    UPDATE signals SET
+      position_size_initial = @positionSizeInitial,
+      position_remaining_percent = 100,
+      position_remaining_size = @positionSizeInitial,
+      profit_realized_total = 0,
+      profit_latent = 0,
+      pnl_total = 0
+    WHERE id = @signalId
+  `).run({ signalId, positionSizeInitial });
+}
+
+/**
+ * Insere une execution pyramidale (fermeture partielle a un TP ou SL).
+ * @param {Object} data - Donnees de l'execution
+ * @returns {Object} Resultat de l'insertion
+ */
+function insertTradeExecution(data) {
+  return db.prepare(`
+    INSERT INTO trade_executions
+      (signal_id, target_number, target_price, position_closed_percent,
+       position_closed_size, profit_realized, profit_realized_percent)
+    VALUES (@signalId, @targetNumber, @targetPrice, @positionClosedPercent,
+            @positionClosedSize, @profitRealized, @profitRealizedPercent)
+  `).run({
+    signalId: data.signalId,
+    targetNumber: data.targetNumber,
+    targetPrice: data.targetPrice || null,
+    positionClosedPercent: data.positionClosedPercent,
+    positionClosedSize: data.positionClosedSize,
+    profitRealized: data.profitRealized,
+    profitRealizedPercent: data.profitRealizedPercent,
+  });
+}
+
+/**
+ * Recupere toutes les executions d'un signal.
+ * @param {number} signalId - ID du signal
+ * @returns {Array} Liste des executions
+ */
+function getTradeExecutions(signalId) {
+  return db.prepare(
+    'SELECT * FROM trade_executions WHERE signal_id = ? ORDER BY target_number ASC'
+  ).all(signalId);
+}
+
+/**
+ * Met a jour l'etat pyramidal d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {Object} data - Donnees a mettre a jour
+ */
+function updateSignalPyramidState(signalId, data) {
+  db.prepare(`
+    UPDATE signals SET
+      position_remaining_percent = @positionRemainingPercent,
+      position_remaining_size = @positionRemainingSize,
+      profit_realized_total = @profitRealizedTotal,
+      profit_latent = @profitLatent,
+      pnl_total = @pnlTotal,
+      status = @status,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = @signalId
+  `).run({
+    signalId,
+    positionRemainingPercent: data.positionRemainingPercent,
+    positionRemainingSize: data.positionRemainingSize,
+    profitRealizedTotal: data.profitRealizedTotal,
+    profitLatent: data.profitLatent ?? 0,
+    pnlTotal: data.pnlTotal,
+    status: data.status,
+  });
+}
+
+/**
+ * Recupere les positions actives (partiellement fermees).
+ * @returns {Array} Signaux avec status='partial'
+ */
+function getActivePositions() {
+  return db.prepare(
+    "SELECT * FROM signals WHERE status = 'partial' ORDER BY created_at DESC"
+  ).all();
+}
+
+/**
+ * Recupere l'exposition totale (somme des positions restantes).
+ * @returns {number} Exposition en dollars
+ */
+function getOpenExposure() {
+  const result = db.prepare(
+    "SELECT COALESCE(SUM(position_remaining_size), 0) as exposure FROM signals WHERE status IN ('open', 'partial')"
+  ).get();
+  return result.exposure;
+}
+
+/**
+ * Recupere tous les signaux dans l'ordre chronologique (pour recalcul).
+ * @returns {Array} Signaux tries par created_at ASC
+ */
+function getAllSignalsChronological() {
+  return db.prepare(
+    'SELECT * FROM signals ORDER BY created_at ASC'
+  ).all();
+}
+
+/**
+ * Supprime toutes les executions pyramidales (pour recalcul).
+ */
+function deleteAllTradeExecutions() {
+  db.prepare('DELETE FROM trade_executions').run();
+  logger.info('Toutes les executions pyramidales supprimees');
+}
+
+/**
+ * Recupere les stop losses d'un signal.
+ * @param {number} signalId - ID du signal
+ * @returns {Array} Liste des stop losses
+ */
+function getStopLosses(signalId) {
+  return db.prepare(
+    'SELECT * FROM stop_losses WHERE signal_id = ? ORDER BY created_at ASC'
+  ).all(signalId);
 }
 
 // ============================================================
@@ -329,10 +477,10 @@ function insertSignal(signal) {
  * @returns {Object|null} La confirmation insérée ou null si doublon
  */
 function insertConfirmation(confirmation) {
-  // Trouver le signal parent (le plus récent pour cette paire, encore ouvert)
+  // Trouver le signal parent (le plus récent pour cette paire, encore ouvert/partiel)
   const signal = db.prepare(`
     SELECT id FROM signals
-    WHERE pair = @pair AND status = 'open'
+    WHERE pair = @pair AND status IN ('open', 'partial')
     ORDER BY created_at DESC
     LIMIT 1
   `).get({ pair: confirmation.pair });
@@ -358,11 +506,11 @@ function insertConfirmation(confirmation) {
 
   if (result.changes > 0) {
     // Mettre à jour le signal parent si trouvé
+    // Note : status et profit pyramidal geres par portfolio-simulator
     if (signalId) {
       db.prepare(`
         UPDATE signals
         SET last_target_hit = MAX(last_target_hit, @targetNumber),
-            status = CASE WHEN @targetNumber >= 5 THEN 'all_tp_hit' ELSE 'tp_hit' END,
             final_profit_pct = @profitPct,
             updated_at = CURRENT_TIMESTAMP
         WHERE id = @signalId
@@ -372,11 +520,7 @@ function insertConfirmation(confirmation) {
         signalId,
       });
 
-      // Appliquer la marge de securite sur le profit Telegram
-      const conservativeProfit = Math.round(confirmation.profitPct * SAFETY_MARGIN_GAINS * 100) / 100;
-      updateSignalProfitCalculated(signalId, conservativeProfit);
-
-      logger.info(`Signal ${signalId} : TP${confirmation.targetNumber} Telegram=${confirmation.profitPct}% → conservateur=${conservativeProfit}% (marge -15%)`);
+      logger.info(`Signal ${signalId} : TP${confirmation.targetNumber} = ${confirmation.profitPct}%`);
     }
 
     logger.info(`Confirmation insérée : ${confirmation.pair} TP${confirmation.targetNumber} +${confirmation.profitPct}%`);
@@ -426,7 +570,7 @@ function insertCancellation(cancellation) {
 function insertStopLoss(slData) {
   const signal = db.prepare(`
     SELECT id FROM signals
-    WHERE pair = @pair AND status IN ('open', 'tp_hit')
+    WHERE pair = @pair AND status IN ('open', 'partial')
     ORDER BY created_at DESC
     LIMIT 1
   `).get({ pair: slData.pair });
@@ -444,23 +588,16 @@ function insertStopLoss(slData) {
     period: slData.period || null,
   });
 
+  // Note : status et calcul de perte geres par portfolio-simulator (pyramide)
   if (signalId) {
     db.prepare(`
       UPDATE signals
-      SET status = 'sl_hit',
-          final_profit_pct = @lossPct,
+      SET final_profit_pct = @lossPct,
           updated_at = CURRENT_TIMESTAMP
       WHERE id = @id
     `).run({ lossPct: slData.lossPct ? -Math.abs(slData.lossPct) : null, id: signalId });
 
-    // Appliquer la marge de securite sur la perte Telegram (amplifier la perte)
-    if (slData.lossPct) {
-      const conservativeLoss = -Math.round(Math.abs(slData.lossPct) * SAFETY_MARGIN_LOSSES * 100) / 100;
-      updateSignalProfitCalculated(signalId, conservativeLoss);
-      logger.info(`Signal ${signalId} : SL Telegram=-${Math.abs(slData.lossPct)}% → conservateur=${conservativeLoss}% (marge +15%)`);
-    }
-
-    logger.info(`Stop loss enregistré pour signal ${signalId} : ${slData.pair}`);
+    logger.info(`Stop loss enregistré pour signal ${signalId} : ${slData.pair} (perte: ${slData.lossPct || '?'}%)`);
   }
 }
 
@@ -505,9 +642,10 @@ function updateSignalPortfolio(signalId, data) {
 }
 
 /**
- * Réinitialise les colonnes de portefeuille de tous les signaux.
+ * Réinitialise les colonnes de portefeuille et les donnees pyramidales.
  */
 function resetPortfolioData() {
+  // Reset colonnes portfolio classiques
   db.prepare(`
     UPDATE signals
     SET virtual_portfolio_before = NULL,
@@ -515,32 +653,25 @@ function resetPortfolioData() {
         position_size = NULL,
         trading_fees_total = NULL,
         net_profit_loss = NULL,
-        profit_calculated = NULL
-  `).run();
-  logger.info('Données de portefeuille réinitialisées');
-}
-
-/**
- * Recalcule profit_calculated pour tous les signaux termines (TP ou SL).
- * Utilise le profit Telegram (final_profit_pct) avec marge de securite.
- * Gains : × 0.85 (-15%), Pertes : × 1.15 (+15%)
- */
-function recalculateAllPrices() {
-  // TP : profit Telegram × 0.85
-  const tpResult = db.prepare(`
-    UPDATE signals
-    SET profit_calculated = ROUND(final_profit_pct * ${SAFETY_MARGIN_GAINS}, 2)
-    WHERE status IN ('tp_hit', 'all_tp_hit') AND final_profit_pct IS NOT NULL
+        profit_calculated = NULL,
+        position_size_initial = NULL,
+        position_remaining_percent = 100,
+        position_remaining_size = NULL,
+        profit_realized_total = 0,
+        profit_latent = NULL,
+        pnl_total = NULL
   `).run();
 
-  // SL : perte Telegram × 1.15 (final_profit_pct est deja negatif)
-  const slResult = db.prepare(`
-    UPDATE signals
-    SET profit_calculated = ROUND(final_profit_pct * ${SAFETY_MARGIN_LOSSES}, 2)
-    WHERE status = 'sl_hit' AND final_profit_pct IS NOT NULL
+  // Remettre les signaux non-annules en statut 'open' pour recalcul
+  db.prepare(`
+    UPDATE signals SET status = 'open'
+    WHERE status IN ('partial', 'closed', 'stopped', 'tp_hit', 'all_tp_hit', 'sl_hit')
   `).run();
 
-  logger.info(`Profit recalculé avec marge : ${tpResult.changes} TP (×${SAFETY_MARGIN_GAINS}) + ${slResult.changes} SL (×${SAFETY_MARGIN_LOSSES})`);
+  // Supprimer toutes les executions pyramidales
+  db.prepare('DELETE FROM trade_executions').run();
+
+  logger.info('Données de portefeuille et pyramide réinitialisées');
 }
 
 // ============================================================
@@ -609,7 +740,7 @@ function getConfirmations(signalId) {
 function getClosedSignals() {
   return db.prepare(`
     SELECT * FROM signals
-    WHERE status IN ('tp_hit', 'all_tp_hit', 'sl_hit')
+    WHERE status IN ('closed', 'stopped', 'partial', 'tp_hit', 'all_tp_hit', 'sl_hit')
     ORDER BY created_at DESC
   `).all();
 }
@@ -622,7 +753,7 @@ function getClosedSignals() {
 function getClosedSignalsSince(since) {
   return db.prepare(`
     SELECT * FROM signals
-    WHERE status IN ('tp_hit', 'all_tp_hit', 'sl_hit')
+    WHERE status IN ('closed', 'stopped', 'partial', 'tp_hit', 'all_tp_hit', 'sl_hit')
       AND created_at >= ?
     ORDER BY created_at DESC
   `).all(since);
@@ -634,9 +765,9 @@ function getClosedSignalsSince(since) {
  */
 function countSignals() {
   const total = db.prepare('SELECT COUNT(*) as count FROM signals').get().count;
-  const open = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status = 'open'").get().count;
-  const won = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status IN ('tp_hit', 'all_tp_hit')").get().count;
-  const lost = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status = 'sl_hit'").get().count;
+  const open = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status IN ('open', 'partial')").get().count;
+  const won = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status IN ('closed', 'tp_hit', 'all_tp_hit')").get().count;
+  const lost = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status IN ('stopped', 'sl_hit')").get().count;
   const cancelled = db.prepare("SELECT COUNT(*) as count FROM signals WHERE status = 'cancelled'").get().count;
 
   return { total, open, won, lost, cancelled };
@@ -680,7 +811,16 @@ module.exports = {
   updateSignalPortfolio,
   updateSignalBinancePrices,
   resetPortfolioData,
-  recalculateAllPrices,
   getGroups,
   close,
+  // Fonctions pyramidales
+  initSignalPosition,
+  insertTradeExecution,
+  getTradeExecutions,
+  updateSignalPyramidState,
+  getActivePositions,
+  getOpenExposure,
+  getAllSignalsChronological,
+  deleteAllTradeExecutions,
+  getStopLosses,
 };

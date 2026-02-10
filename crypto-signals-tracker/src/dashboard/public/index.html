@@ -91,6 +91,11 @@
           <div class="stat-label">Pertes consec. max</div>
           <div class="stat-value neutral" id="portfolioMaxLosses">--</div>
         </div>
+        <div class="stat-card">
+          <div class="stat-label">Exposition</div>
+          <div class="stat-value neutral" id="portfolioExposure">--</div>
+          <div class="stat-sub" id="portfolioExposureSub"></div>
+        </div>
       </div>
 
       <!-- Graphique evolution du capital -->
@@ -102,41 +107,38 @@
       </div>
     </section>
 
+    <!-- ---- Positions Ouvertes ---- -->
+    <section class="portfolio-section" id="activePositionsSection" style="display:none;">
+      <h2 class="section-title">Positions ouvertes</h2>
+      <div id="activePositionsContainer"></div>
+    </section>
+
     <!-- ---- Graphiques ---- -->
     <section class="charts-grid">
-      <!-- Courbe de profit cumule -->
       <div class="chart-card full-width">
         <div class="chart-title">Rentabilite cumulee dans le temps</div>
         <div class="chart-container">
           <canvas id="profitChart"></canvas>
         </div>
       </div>
-
-      <!-- Performance par paire -->
       <div class="chart-card">
         <div class="chart-title">Performance par paire</div>
         <div class="chart-container">
           <canvas id="pairChart"></canvas>
         </div>
       </div>
-
-      <!-- Performance par jour -->
       <div class="chart-card">
         <div class="chart-title">Performance par jour de la semaine</div>
         <div class="chart-container">
           <canvas id="dayChart"></canvas>
         </div>
       </div>
-
-      <!-- Distribution des profits -->
       <div class="chart-card">
         <div class="chart-title">Distribution des profits</div>
         <div class="chart-container">
           <canvas id="distChart"></canvas>
         </div>
       </div>
-
-      <!-- Win/Loss par paire -->
       <div class="chart-card">
         <div class="chart-title">Win Rate par paire</div>
         <div id="pairStatsContainer" style="overflow-y:auto; max-height:300px;">
@@ -165,10 +167,10 @@
           </select>
           <select class="filter-select" id="filterStatus" onchange="loadTrades()">
             <option value="">Tous les statuts</option>
-            <option value="open">En cours</option>
-            <option value="tp_hit">Gagnant (TP)</option>
-            <option value="all_tp_hit">Tous TP</option>
-            <option value="sl_hit">Perdant (SL)</option>
+            <option value="open">En attente</option>
+            <option value="partial">Partiel</option>
+            <option value="closed">Ferme</option>
+            <option value="stopped">Stoppe</option>
             <option value="cancelled">Annule</option>
           </select>
           <select class="filter-select" id="filterPair" onchange="loadTrades()">
@@ -186,14 +188,15 @@
               <th onclick="sortTrades('created_at')">Date <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('pair')">Paire <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('direction')">Direction <span class="sort-arrow">&#9650;</span></th>
-              <th>Entree</th>
               <th>Leverage</th>
-              <th>Targets</th>
-              <th onclick="sortTrades('final_profit_pct')">Profit % <span class="sort-arrow">&#9650;</span></th>
-              <th>Stop Loss</th>
-              <th onclick="sortTrades('net_profit_loss')">P&L Net ($) <span class="sort-arrow">&#9650;</span></th>
+              <th>Position</th>
+              <th>% Ferme</th>
+              <th onclick="sortTrades('profit_realized_total')">Realise ($) <span class="sort-arrow">&#9650;</span></th>
+              <th>Latent ($)</th>
+              <th onclick="sortTrades('pnl_total')">P&L Total <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('source_group_name')">Source <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('status')">Statut <span class="sort-arrow">&#9650;</span></th>
+              <th>Details</th>
             </tr>
           </thead>
           <tbody id="tradesBody"></tbody>
@@ -210,6 +213,19 @@
       </div>
     </section>
 
+  </div>
+
+  <!-- ---- Modal Detail Trade ---- -->
+  <div class="modal-overlay" id="tradeModal" onclick="closeModal(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 id="modalTitle">Detail du trade</h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body" id="modalBody">
+        Chargement...
+      </div>
+    </div>
   </div>
 
   <!-- Chart.js depuis CDN -->

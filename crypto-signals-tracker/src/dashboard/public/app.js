@@ -1,25 +1,19 @@
 // ============================================================
-// app.js - Logique frontend du dashboard
-// ============================================================
-// Gere le chargement des donnees, les graphiques, les filtres,
-// le tri et la pagination du tableau des trades.
-// Rafraichissement automatique toutes les 30 secondes.
+// app.js - Logique frontend du dashboard (pyramidal multi-TP)
 // ============================================================
 
 // ---- Variables globales ----
 let currentPage = 1;
 let currentSort = { column: 'created_at', direction: 'desc' };
-let allTrades = [];       // Tous les trades charges
-let charts = {};          // Instances Chart.js
+let allTrades = [];
+let charts = {};
 let refreshInterval = null;
 
-// ---- Initialisation au chargement de la page ----
+// ---- Initialisation ----
 document.addEventListener('DOMContentLoaded', () => {
   refreshAll();
   loadPairFilter();
   loadGroupFilter();
-
-  // Rafraichissement automatique toutes les 30 secondes
   refreshInterval = setInterval(refreshAll, 30000);
 });
 
@@ -27,9 +21,6 @@ document.addEventListener('DOMContentLoaded', () => {
 // CHARGEMENT DES DONNEES
 // ============================================================
 
-/**
- * Rafraichit toutes les donnees du dashboard.
- */
 async function refreshAll() {
   try {
     await Promise.all([
@@ -37,6 +28,7 @@ async function refreshAll() {
       loadTrades(),
       loadCharts(),
       loadPortfolio(),
+      loadActivePositions(),
       checkHealth(),
     ]);
     document.getElementById('lastRefresh').textContent =
@@ -46,40 +38,32 @@ async function refreshAll() {
   }
 }
 
-/**
- * Charge les statistiques globales et met a jour les KPI.
- */
 async function loadStats() {
   try {
     const response = await fetch('/api/stats');
     if (response.status === 401) return window.location.href = '/login';
     const data = await response.json();
 
-    // Profit cumule
     const profitEl = document.getElementById('kpiTotalProfit');
     profitEl.textContent = formatProfit(data.totalProfit);
     profitEl.className = 'kpi-value ' + (data.totalProfit >= 0 ? 'positive' : 'negative');
     document.getElementById('kpiTotalProfitSub').textContent =
-      `Drawdown max : ${data.maxDrawdown}%`;
+      'Drawdown max : ' + data.maxDrawdown + '%';
 
-    // Win Rate
     const wrEl = document.getElementById('kpiWinRate');
     wrEl.textContent = data.winRate + '%';
     wrEl.className = 'kpi-value ' + (data.winRate >= 50 ? 'positive' : data.winRate > 0 ? 'negative' : 'neutral');
     document.getElementById('kpiWinRateSub').textContent =
-      `${data.counts.won} gagnants / ${data.counts.lost} perdants`;
+      data.counts.won + ' gagnants / ' + data.counts.lost + ' perdants';
 
-    // Total trades
     document.getElementById('kpiTotalTrades').textContent = data.counts.total;
     document.getElementById('kpiTotalTradesSub').textContent =
-      `${data.counts.open} en cours | ${data.counts.cancelled} annules`;
+      data.counts.open + ' en cours | ' + data.counts.cancelled + ' annules';
 
-    // Profit moyen
     const avgEl = document.getElementById('kpiAvgProfit');
     avgEl.textContent = formatProfit(data.avgProfit);
     avgEl.className = 'kpi-value ' + (data.avgProfit >= 0 ? 'positive' : 'negative');
 
-    // Meilleur trade
     const bestEl = document.getElementById('kpiBestTrade');
     if (data.bestTrade) {
       bestEl.textContent = '+' + data.bestTrade.profit + '%';
@@ -89,7 +73,6 @@ async function loadStats() {
       bestEl.textContent = '--';
     }
 
-    // Pire trade
     const worstEl = document.getElementById('kpiWorstTrade');
     if (data.worstTrade) {
       worstEl.textContent = data.worstTrade.profit + '%';
@@ -103,9 +86,6 @@ async function loadStats() {
   }
 }
 
-/**
- * Charge la liste des trades avec filtres et pagination.
- */
 async function loadTrades() {
   try {
     const group = document.getElementById('filterGroup').value;
@@ -130,10 +110,9 @@ async function loadTrades() {
     allTrades = data.trades;
     renderTrades(allTrades);
 
-    // Pagination
     const { page, total, totalPages } = data.pagination;
     document.getElementById('paginationInfo').textContent =
-      `Page ${page} / ${totalPages} (${total} trades)`;
+      'Page ' + page + ' / ' + totalPages + ' (' + total + ' trades)';
     document.getElementById('prevBtn').disabled = page <= 1;
     document.getElementById('nextBtn').disabled = page >= totalPages;
   } catch (err) {
@@ -141,9 +120,6 @@ async function loadTrades() {
   }
 }
 
-/**
- * Charge les donnees pour les graphiques.
- */
 async function loadCharts() {
   try {
     const response = await fetch('/api/chart-data');
@@ -160,9 +136,6 @@ async function loadCharts() {
   }
 }
 
-/**
- * Charge la liste des paires pour le filtre.
- */
 async function loadPairFilter() {
   try {
     const response = await fetch('/api/pairs');
@@ -170,7 +143,6 @@ async function loadPairFilter() {
     const pairs = await response.json();
 
     const select = document.getElementById('filterPair');
-    // Garder seulement la premiere option "Toutes les paires"
     while (select.options.length > 1) select.remove(1);
     pairs.forEach(pair => {
       const opt = document.createElement('option');
@@ -183,9 +155,6 @@ async function loadPairFilter() {
   }
 }
 
-/**
- * Charge la liste des groupes sources pour le filtre.
- */
 async function loadGroupFilter() {
   try {
     const response = await fetch('/api/groups');
@@ -193,12 +162,10 @@ async function loadGroupFilter() {
     const groups = await response.json();
 
     const select = document.getElementById('filterGroup');
-    // Garder seulement la premiere option "Tous les groupes"
     while (select.options.length > 1) select.remove(1);
     groups.forEach(group => {
       const opt = document.createElement('option');
       opt.value = group;
-      // Nom court pour le dropdown
       opt.textContent = group.replace('CryptoMau ', '').replace(' Trading Signals', '').replace(' Signals', '');
       select.appendChild(opt);
     });
@@ -207,9 +174,6 @@ async function loadGroupFilter() {
   }
 }
 
-/**
- * Verifie l'etat de sante du systeme.
- */
 async function checkHealth() {
   try {
     const response = await fetch('/api/health');
@@ -231,55 +195,187 @@ async function checkHealth() {
   }
 }
 
-/**
- * Charge les donnees du portefeuille virtuel.
- */
+// ============================================================
+// PORTEFEUILLE
+// ============================================================
+
 async function loadPortfolio() {
   try {
     const response = await fetch('/api/portfolio');
     if (response.status === 401) return;
     const data = await response.json();
 
-    // Capital actuel
     const capEl = document.getElementById('portfolioCapital');
     capEl.textContent = data.current.toFixed(2) + '$';
     capEl.className = 'stat-value ' + (data.current >= data.initial ? 'positive' : 'negative');
     document.getElementById('portfolioCapitalSub').textContent =
       'Initial : ' + data.initial.toFixed(2) + '$';
 
-    // ROI
     const roiEl = document.getElementById('portfolioRoi');
     roiEl.textContent = (data.roi >= 0 ? '+' : '') + data.roi + '%';
     roiEl.className = 'stat-value ' + (data.roi >= 0 ? 'positive' : 'negative');
 
-    // Gain net
     const gainEl = document.getElementById('portfolioGain');
     gainEl.textContent = (data.totalGain >= 0 ? '+' : '') + data.totalGain.toFixed(2) + '$';
     gainEl.className = 'stat-value ' + (data.totalGain >= 0 ? 'positive' : 'negative');
 
-    // Frais cumules
     document.getElementById('portfolioFees').textContent = data.totalFees.toFixed(2) + '$';
 
-    // Win Rate portfolio
     const wrEl = document.getElementById('portfolioWinRate');
     wrEl.textContent = data.winRate + '%';
     wrEl.className = 'stat-value ' + (data.winRate >= 50 ? 'positive' : data.winRate > 0 ? 'negative' : 'neutral');
     document.getElementById('portfolioWinRateSub').textContent =
       data.winCount + 'W / ' + data.lossCount + 'L';
 
-    // Pertes consecutives max
     document.getElementById('portfolioMaxLosses').textContent = data.maxConsecutiveLosses;
 
-    // Graphique evolution du capital
+    // Exposition
+    const exposureEl = document.getElementById('portfolioExposure');
+    const exposure = data.exposure || 0;
+    exposureEl.textContent = exposure.toFixed(2) + '$';
+    document.getElementById('portfolioExposureSub').textContent =
+      'Dispo : ' + (data.current - exposure).toFixed(2) + '$';
+
     renderPortfolioChart(data.history);
   } catch (err) {
     console.error('Erreur chargement portfolio :', err);
   }
 }
 
-/**
- * Graphique d'evolution du capital en dollars.
- */
+// ============================================================
+// POSITIONS OUVERTES
+// ============================================================
+
+async function loadActivePositions() {
+  try {
+    const response = await fetch('/api/trades/active');
+    if (response.status === 401) return;
+    const positions = await response.json();
+
+    const section = document.getElementById('activePositionsSection');
+    const container = document.getElementById('activePositionsContainer');
+
+    if (!positions || positions.length === 0) {
+      section.style.display = 'none';
+      return;
+    }
+
+    section.style.display = 'block';
+    container.innerHTML = positions.map(pos => {
+      const closedPct = (100 - (pos.position_remaining_percent || 100)).toFixed(1);
+      const tps = pos.targetsHitList ? pos.targetsHitList.join(', ') : '--';
+      const realized = pos.profit_realized_total || 0;
+      const latent = pos.profit_latent || 0;
+      const pnl = pos.pnl_total || 0;
+      const remaining = pos.position_remaining_size || 0;
+
+      return '<div class="active-position-card">' +
+        '<div class="ap-header">' +
+          '<strong>' + pos.pair + '</strong> ' +
+          '<span class="direction-' + pos.direction.toLowerCase() + '">' + pos.direction + '</span> ' +
+          'X' + pos.leverage +
+        '</div>' +
+        '<div class="ap-body">' +
+          '<div class="ap-row"><span>Position restante</span><span>' + (pos.position_remaining_percent || 0).toFixed(1) + '% (' + remaining.toFixed(2) + '$)</span></div>' +
+          '<div class="ap-row"><span>Ferme</span><span>' + closedPct + '% (' + tps + ')</span></div>' +
+          '<div class="ap-row"><span>Profit realise</span><span class="' + (realized >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (realized >= 0 ? '+' : '') + realized.toFixed(2) + '$</span></div>' +
+          '<div class="ap-row"><span>P&L latent</span><span class="' + (latent >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (latent >= 0 ? '+' : '') + latent.toFixed(2) + '$</span></div>' +
+          '<div class="ap-row ap-total"><span>P&L total</span><span class="' + (pnl >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '$</span></div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  } catch (err) {
+    console.error('Erreur chargement positions actives :', err);
+  }
+}
+
+// ============================================================
+// MODAL DETAIL TRADE
+// ============================================================
+
+async function showTradeDetail(tradeId) {
+  const modal = document.getElementById('tradeModal');
+  const title = document.getElementById('modalTitle');
+  const body = document.getElementById('modalBody');
+
+  modal.classList.add('visible');
+  body.innerHTML = 'Chargement...';
+
+  try {
+    const response = await fetch('/api/trades/' + tradeId + '/executions');
+    if (response.status === 401) return window.location.href = '/login';
+    const data = await response.json();
+
+    const sig = data.signal;
+    const execs = data.executions || [];
+
+    title.textContent = sig.pair + ' ' + sig.direction + ' X' + sig.leverage;
+
+    let html = '<div class="modal-info">';
+    html += '<div class="mi-row"><span>Position initiale</span><span>' + (sig.position_size_initial || 0).toFixed(2) + '$</span></div>';
+    html += '<div class="mi-row"><span>Entree</span><span>$' + sig.entry_price_min + ' - $' + sig.entry_price_max + '</span></div>';
+    html += '<div class="mi-row"><span>Stop Loss</span><span>$' + sig.stop_loss + '</span></div>';
+    html += '<div class="mi-row"><span>Statut</span><span>' + statusBadge(sig.status) + '</span></div>';
+    html += '</div>';
+
+    if (execs.length > 0) {
+      html += '<h4 style="margin:16px 0 8px;color:var(--accent-blue);">Executions</h4>';
+      html += '<table class="modal-table"><thead><tr><th>TP</th><th>% Ferme</th><th>Taille</th><th>Profit %</th><th>Profit $</th></tr></thead><tbody>';
+
+      let totalRealized = 0;
+      for (const ex of execs) {
+        const isSL = ex.target_number === 0;
+        const label = isSL ? 'SL' : 'TP' + ex.target_number;
+        const profitClass = ex.profit_realized >= 0 ? 'profit-positive' : 'profit-negative';
+        totalRealized += ex.profit_realized || 0;
+
+        html += '<tr>';
+        html += '<td><strong>' + label + '</strong></td>';
+        html += '<td>' + (ex.position_closed_percent || 0).toFixed(1) + '%</td>';
+        html += '<td>' + (ex.position_closed_size || 0).toFixed(2) + '$</td>';
+        html += '<td class="' + profitClass + '">' + (ex.profit_realized_percent || 0).toFixed(2) + '%</td>';
+        html += '<td class="' + profitClass + '">' + (ex.profit_realized >= 0 ? '+' : '') + (ex.profit_realized || 0).toFixed(2) + '$</td>';
+        html += '</tr>';
+      }
+
+      html += '</tbody></table>';
+
+      html += '<div class="modal-summary">';
+      html += '<div class="mi-row"><span>Total realise</span><span class="' + (totalRealized >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (totalRealized >= 0 ? '+' : '') + totalRealized.toFixed(2) + '$</span></div>';
+      const remaining = sig.position_remaining_percent || 0;
+      html += '<div class="mi-row"><span>Position restante</span><span>' + remaining.toFixed(1) + '%' + (remaining > 0 ? ' (' + (sig.position_remaining_size || 0).toFixed(2) + '$)' : '') + '</span></div>';
+      if (sig.profit_latent && remaining > 0) {
+        html += '<div class="mi-row"><span>P&L latent</span><span class="' + (sig.profit_latent >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (sig.profit_latent >= 0 ? '+' : '') + sig.profit_latent.toFixed(2) + '$</span></div>';
+      }
+      const pnl = sig.pnl_total || totalRealized;
+      html += '<div class="mi-row mi-total"><span>P&L Total</span><span class="' + (pnl >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '$</span></div>';
+      html += '</div>';
+    } else {
+      html += '<p style="color:var(--text-muted);margin-top:16px;">Aucune execution enregistree.</p>';
+    }
+
+    body.innerHTML = html;
+  } catch (err) {
+    body.innerHTML = '<p style="color:var(--accent-red);">Erreur chargement details.</p>';
+    console.error('Erreur modal :', err);
+  }
+}
+
+function closeModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('tradeModal').classList.remove('visible');
+}
+
+// ============================================================
+// RENDU DES GRAPHIQUES
+// ============================================================
+
+const chartDefaults = {
+  color: '#8b949e',
+  borderColor: '#30363d',
+  gridColor: 'rgba(48, 54, 61, 0.6)',
+};
+
 function renderPortfolioChart(history) {
   const ctx = document.getElementById('portfolioChart');
   if (charts.portfolio) charts.portfolio.destroy();
@@ -295,10 +391,8 @@ function renderPortfolioChart(history) {
 
   const labels = history.map(h => h.trade ? formatDate(h.date) : 'Debut');
   const values = history.map(h => h.capital);
-
-  // Couleur des points selon profit/perte
   const pointColors = history.map(h => {
-    if (h.trade === null) return '#bc8cff'; // Point de depart
+    if (h.trade === null) return '#bc8cff';
     return h.profitNet >= 0 ? '#3fb950' : '#f85149';
   });
 
@@ -311,16 +405,12 @@ function renderPortfolioChart(history) {
         data: values,
         borderColor: '#bc8cff',
         backgroundColor: 'rgba(188, 140, 255, 0.1)',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 4,
-        pointBackgroundColor: pointColors,
-        pointBorderColor: pointColors,
+        fill: true, tension: 0.3, pointRadius: 4,
+        pointBackgroundColor: pointColors, pointBorderColor: pointColors,
       }],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
+      responsive: true, maintainAspectRatio: false,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -338,53 +428,25 @@ function renderPortfolioChart(history) {
         },
       },
       scales: {
-        x: {
-          ticks: { color: chartDefaults.color, maxTicksLimit: 15 },
-          grid: { color: chartDefaults.gridColor },
-        },
-        y: {
-          ticks: {
-            color: chartDefaults.color,
-            callback: (v) => v + '$',
-          },
-          grid: { color: chartDefaults.gridColor },
-        },
+        x: { ticks: { color: chartDefaults.color, maxTicksLimit: 15 }, grid: { color: chartDefaults.gridColor } },
+        y: { ticks: { color: chartDefaults.color, callback: (v) => v + '$' }, grid: { color: chartDefaults.gridColor } },
       },
     },
   });
 }
 
-// ============================================================
-// RENDU DES GRAPHIQUES
-// ============================================================
-
-// Couleurs communes pour Chart.js en dark mode
-const chartDefaults = {
-  color: '#8b949e',
-  borderColor: '#30363d',
-  gridColor: 'rgba(48, 54, 61, 0.6)',
-};
-
-/**
- * Graphique de profit cumule dans le temps.
- */
 function renderProfitChart(profitData) {
   const ctx = document.getElementById('profitChart');
   if (charts.profit) charts.profit.destroy();
 
   if (!profitData || profitData.length === 0) {
-    charts.profit = new Chart(ctx, {
-      type: 'line',
-      data: { labels: [], datasets: [] },
-      options: { plugins: { title: { display: true, text: 'Aucune donnee', color: '#8b949e' } } },
-    });
+    charts.profit = new Chart(ctx, { type: 'line', data: { labels: [], datasets: [] },
+      options: { plugins: { title: { display: true, text: 'Aucune donnee', color: '#8b949e' } } } });
     return;
   }
 
   const labels = profitData.map(d => formatDate(d.date));
   const values = profitData.map(d => d.profit);
-
-  // Colorer en vert/rouge selon positif/negatif
   const pointColors = values.map(v => v >= 0 ? '#3fb950' : '#f85149');
 
   charts.profit = new Chart(ctx, {
@@ -392,190 +454,76 @@ function renderProfitChart(profitData) {
     data: {
       labels,
       datasets: [{
-        label: 'Profit cumule (%)',
-        data: values,
-        borderColor: '#58a6ff',
-        backgroundColor: 'rgba(88, 166, 255, 0.1)',
-        fill: true,
-        tension: 0.3,
-        pointRadius: 4,
-        pointBackgroundColor: pointColors,
-        pointBorderColor: pointColors,
+        label: 'Profit cumule (%)', data: values,
+        borderColor: '#58a6ff', backgroundColor: 'rgba(88, 166, 255, 0.1)',
+        fill: true, tension: 0.3, pointRadius: 4,
+        pointBackgroundColor: pointColors, pointBorderColor: pointColors,
       }],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            label: (ctx) => `Profit cumule : ${ctx.parsed.y}%`,
-            afterLabel: (ctx) => profitData[ctx.dataIndex] ? profitData[ctx.dataIndex].pair : '',
-          },
-        },
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: {
+          label: (ctx) => 'Profit cumule : ' + ctx.parsed.y + '%',
+          afterLabel: (ctx) => profitData[ctx.dataIndex] ? profitData[ctx.dataIndex].pair : '',
+        } },
       },
       scales: {
-        x: {
-          ticks: { color: chartDefaults.color, maxTicksLimit: 15 },
-          grid: { color: chartDefaults.gridColor },
-        },
-        y: {
-          ticks: {
-            color: chartDefaults.color,
-            callback: (v) => v + '%',
-          },
-          grid: { color: chartDefaults.gridColor },
-        },
+        x: { ticks: { color: chartDefaults.color, maxTicksLimit: 15 }, grid: { color: chartDefaults.gridColor } },
+        y: { ticks: { color: chartDefaults.color, callback: (v) => v + '%' }, grid: { color: chartDefaults.gridColor } },
       },
     },
   });
 }
 
-/**
- * Graphique a barres : profit par paire.
- */
 function renderPairChart(byPair) {
   const ctx = document.getElementById('pairChart');
   if (charts.pair) charts.pair.destroy();
-
-  if (!byPair || byPair.length === 0) {
-    charts.pair = new Chart(ctx, {
-      type: 'bar',
-      data: { labels: [], datasets: [] },
-    });
-    return;
-  }
+  if (!byPair || byPair.length === 0) { charts.pair = new Chart(ctx, { type: 'bar', data: { labels: [], datasets: [] } }); return; }
 
   const sorted = [...byPair].sort((a, b) => b.totalProfit - a.totalProfit);
-  const labels = sorted.map(p => p.pair);
-  const values = sorted.map(p => p.totalProfit);
-  const colors = values.map(v => v >= 0 ? '#3fb950' : '#f85149');
-
   charts.pair = new Chart(ctx, {
     type: 'bar',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Profit total (%)',
-        data: values,
-        backgroundColor: colors,
-        borderRadius: 4,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: {
-          ticks: { color: chartDefaults.color },
-          grid: { display: false },
-        },
-        y: {
-          ticks: {
-            color: chartDefaults.color,
-            callback: (v) => v + '%',
-          },
-          grid: { color: chartDefaults.gridColor },
-        },
-      },
-    },
+    data: { labels: sorted.map(p => p.pair),
+      datasets: [{ label: 'Profit total (%)', data: sorted.map(p => p.totalProfit),
+        backgroundColor: sorted.map(p => p.totalProfit >= 0 ? '#3fb950' : '#f85149'), borderRadius: 4 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: chartDefaults.color }, grid: { display: false } },
+        y: { ticks: { color: chartDefaults.color, callback: (v) => v + '%' }, grid: { color: chartDefaults.gridColor } } } },
   });
 }
 
-/**
- * Graphique a barres : performance par jour.
- */
 function renderDayChart(byDay) {
   const ctx = document.getElementById('dayChart');
   if (charts.day) charts.day.destroy();
-
   if (!byDay) return;
-
-  const labels = byDay.map(d => d.day);
-  const values = byDay.map(d => d.totalProfit);
-  const colors = values.map(v => v >= 0 ? '#3fb950' : '#f85149');
 
   charts.day = new Chart(ctx, {
     type: 'bar',
-    data: {
-      labels,
-      datasets: [{
-        label: 'Profit total (%)',
-        data: values,
-        backgroundColor: colors,
-        borderRadius: 4,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: {
-          ticks: { color: chartDefaults.color },
-          grid: { display: false },
-        },
-        y: {
-          ticks: {
-            color: chartDefaults.color,
-            callback: (v) => v + '%',
-          },
-          grid: { color: chartDefaults.gridColor },
-        },
-      },
-    },
+    data: { labels: byDay.map(d => d.day),
+      datasets: [{ label: 'Profit total (%)', data: byDay.map(d => d.totalProfit),
+        backgroundColor: byDay.map(d => d.totalProfit >= 0 ? '#3fb950' : '#f85149'), borderRadius: 4 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: chartDefaults.color }, grid: { display: false } },
+        y: { ticks: { color: chartDefaults.color, callback: (v) => v + '%' }, grid: { color: chartDefaults.gridColor } } } },
   });
 }
 
-/**
- * Histogramme de distribution des profits.
- */
 function renderDistChart(distData) {
   const ctx = document.getElementById('distChart');
   if (charts.dist) charts.dist.destroy();
-
-  if (!distData || distData.bins.length === 0) {
-    charts.dist = new Chart(ctx, {
-      type: 'bar',
-      data: { labels: [], datasets: [] },
-    });
-    return;
-  }
+  if (!distData || distData.bins.length === 0) { charts.dist = new Chart(ctx, { type: 'bar', data: { labels: [], datasets: [] } }); return; }
 
   charts.dist = new Chart(ctx, {
     type: 'bar',
-    data: {
-      labels: distData.bins,
-      datasets: [{
-        label: 'Nombre de trades',
-        data: distData.counts,
-        backgroundColor: '#bc8cff',
-        borderRadius: 4,
-      }],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: {
-          ticks: { color: chartDefaults.color, maxRotation: 45 },
-          grid: { display: false },
-        },
-        y: {
-          ticks: { color: chartDefaults.color, stepSize: 1 },
-          grid: { color: chartDefaults.gridColor },
-        },
-      },
-    },
+    data: { labels: distData.bins,
+      datasets: [{ label: 'Nombre de trades', data: distData.counts, backgroundColor: '#bc8cff', borderRadius: 4 }] },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } },
+      scales: { x: { ticks: { color: chartDefaults.color, maxRotation: 45 }, grid: { display: false } },
+        y: { ticks: { color: chartDefaults.color, stepSize: 1 }, grid: { color: chartDefaults.gridColor } } } },
   });
 }
 
-/**
- * Tableau de stats par paire (dans le chart-card).
- */
 function renderPairStatsTable(byPair) {
   const tbody = document.getElementById('pairStatsBody');
   if (!byPair || byPair.length === 0) {
@@ -584,59 +532,61 @@ function renderPairStatsTable(byPair) {
   }
 
   const sorted = [...byPair].sort((a, b) => b.totalProfit - a.totalProfit);
-  tbody.innerHTML = sorted.map(p => `
-    <tr>
-      <td><strong>${p.pair}</strong></td>
-      <td>${p.trades}</td>
-      <td class="${p.winRate >= 50 ? 'profit-positive' : 'profit-negative'}">${p.winRate}%</td>
-      <td class="${p.totalProfit >= 0 ? 'profit-positive' : 'profit-negative'}">${formatProfit(p.totalProfit)}</td>
-    </tr>
-  `).join('');
+  tbody.innerHTML = sorted.map(p =>
+    '<tr><td><strong>' + p.pair + '</strong></td><td>' + p.trades + '</td>' +
+    '<td class="' + (p.winRate >= 50 ? 'profit-positive' : 'profit-negative') + '">' + p.winRate + '%</td>' +
+    '<td class="' + (p.totalProfit >= 0 ? 'profit-positive' : 'profit-negative') + '">' + formatProfit(p.totalProfit) + '</td></tr>'
+  ).join('');
 }
 
 // ============================================================
-// RENDU DU TABLEAU DES TRADES
+// RENDU DU TABLEAU DES TRADES (PYRAMIDAL)
 // ============================================================
 
-/**
- * Affiche les trades dans le tableau HTML.
- */
 function renderTrades(trades) {
   const tbody = document.getElementById('tradesBody');
 
   if (!trades || trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
     return;
   }
 
   tbody.innerHTML = trades.map(trade => {
-    const targets = Array.isArray(trade.targets) ? trade.targets : [];
-    const targetsHit = trade.last_target_hit || 0;
-    const pnl = trade.net_profit_loss;
+    const posInitial = trade.position_size_initial;
+    const posText = posInitial ? posInitial.toFixed(2) + '$' : '--';
+
+    const closedPct = posInitial ? (100 - (trade.position_remaining_percent || 100)).toFixed(1) + '%' : '--';
+
+    const realized = trade.profit_realized_total;
+    const realizedText = realized != null ? ((realized >= 0 ? '+' : '') + realized.toFixed(2) + '$') : '--';
+    const realizedClass = realized != null ? (realized >= 0 ? 'profit-positive' : 'profit-negative') : '';
+
+    const latent = trade.profit_latent;
+    const latentText = latent != null && latent !== 0 ? ((latent >= 0 ? '+' : '') + latent.toFixed(2) + '$') : '--';
+    const latentClass = latent != null ? (latent >= 0 ? 'profit-positive' : 'profit-negative') : '';
+
+    const pnl = trade.pnl_total;
     const pnlText = pnl != null ? ((pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '$') : '--';
     const pnlClass = pnl != null ? (pnl >= 0 ? 'profit-positive' : 'profit-negative') : '';
-    // Nom court du groupe source
+
     const source = trade.source_group_name
       ? trade.source_group_name.replace('CryptoMau ', '').replace(' Trading Signals', '').replace(' Signals', '')
       : '--';
 
-    return `
-      <tr>
-        <td>${formatDate(trade.created_at)}</td>
-        <td><strong>${trade.pair}</strong></td>
-        <td class="direction-${trade.direction.toLowerCase()}">${trade.direction}</td>
-        <td>$${trade.entry_price_min} - $${trade.entry_price_max}</td>
-        <td>X${trade.leverage}</td>
-        <td>${targetsHit}/${targets.length}</td>
-        <td class="${(trade.final_profit_pct || 0) >= 0 ? 'profit-positive' : 'profit-negative'}">
-          ${trade.final_profit_pct != null ? formatProfit(trade.final_profit_pct) : '--'}
-        </td>
-        <td>$${trade.stop_loss}</td>
-        <td class="${pnlClass}">${pnlText}</td>
-        <td><span class="badge badge-source">${source}</span></td>
-        <td>${statusBadge(trade.status)}</td>
-      </tr>
-    `;
+    return '<tr>' +
+      '<td>' + formatDate(trade.created_at) + '</td>' +
+      '<td><strong>' + trade.pair + '</strong></td>' +
+      '<td class="direction-' + trade.direction.toLowerCase() + '">' + trade.direction + '</td>' +
+      '<td>X' + trade.leverage + '</td>' +
+      '<td>' + posText + '</td>' +
+      '<td>' + closedPct + '</td>' +
+      '<td class="' + realizedClass + '">' + realizedText + '</td>' +
+      '<td class="' + latentClass + '">' + latentText + '</td>' +
+      '<td class="' + pnlClass + '">' + pnlText + '</td>' +
+      '<td><span class="badge badge-source">' + source + '</span></td>' +
+      '<td>' + statusBadge(trade.status) + '</td>' +
+      '<td>' + (trade.id ? '<button class="btn btn-detail" onclick="showTradeDetail(' + trade.id + ')">Voir</button>' : '--') + '</td>' +
+      '</tr>';
   }).join('');
 }
 
@@ -644,9 +594,6 @@ function renderTrades(trades) {
 // TRI ET PAGINATION
 // ============================================================
 
-/**
- * Trie les trades par colonne.
- */
 function sortTrades(column) {
   if (currentSort.column === column) {
     currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
@@ -658,13 +605,10 @@ function sortTrades(column) {
   allTrades.sort((a, b) => {
     let valA = a[column];
     let valB = b[column];
-
     if (typeof valA === 'string') valA = valA.toLowerCase();
     if (typeof valB === 'string') valB = valB.toLowerCase();
-
     if (valA == null) valA = currentSort.direction === 'asc' ? Infinity : -Infinity;
     if (valB == null) valB = currentSort.direction === 'asc' ? Infinity : -Infinity;
-
     if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
     if (valA > valB) return currentSort.direction === 'asc' ? 1 : -1;
     return 0;
@@ -673,9 +617,6 @@ function sortTrades(column) {
   renderTrades(allTrades);
 }
 
-/**
- * Change de page.
- */
 function changePage(delta) {
   currentPage = Math.max(1, currentPage + delta);
   loadTrades();
@@ -685,18 +626,12 @@ function changePage(delta) {
 // UTILITAIRES
 // ============================================================
 
-/**
- * Formate un profit avec signe et %.
- */
 function formatProfit(value) {
   if (value == null) return '--';
   const rounded = Math.round(value * 100) / 100;
   return (rounded >= 0 ? '+' : '') + rounded + '%';
 }
 
-/**
- * Formate une date en format lisible.
- */
 function formatDate(dateStr) {
   if (!dateStr) return '--';
   const d = new Date(dateStr);
@@ -707,24 +642,22 @@ function formatDate(dateStr) {
   });
 }
 
-/**
- * Retourne un badge HTML pour le statut.
- */
 function statusBadge(status) {
   const map = {
-    'open':       { label: 'En cours',   css: 'badge-open' },
-    'tp_hit':     { label: 'TP Hit',     css: 'badge-won' },
-    'all_tp_hit': { label: 'All TP',     css: 'badge-won' },
-    'sl_hit':     { label: 'SL Hit',     css: 'badge-lost' },
-    'cancelled':  { label: 'Annule',     css: 'badge-cancelled' },
+    'open':       { label: 'En attente',  css: 'badge-open' },
+    'pending':    { label: 'En attente',  css: 'badge-open' },
+    'partial':    { label: 'Partiel',     css: 'badge-partial' },
+    'closed':     { label: 'Ferme',       css: 'badge-won' },
+    'stopped':    { label: 'Stoppe',      css: 'badge-lost' },
+    'tp_hit':     { label: 'TP Hit',      css: 'badge-won' },
+    'all_tp_hit': { label: 'All TP',      css: 'badge-won' },
+    'sl_hit':     { label: 'SL Hit',      css: 'badge-lost' },
+    'cancelled':  { label: 'Annule',      css: 'badge-cancelled' },
   };
   const s = map[status] || { label: status, css: '' };
-  return `<span class="badge ${s.css}">${s.label}</span>`;
+  return '<span class="badge ' + s.css + '">' + s.label + '</span>';
 }
 
-/**
- * Deconnexion.
- */
 async function logout() {
   try {
     await fetch('/api/logout', { method: 'POST' });

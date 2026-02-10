@@ -222,6 +222,8 @@ async function handleMessage(message) {
         // Nouveau signal de trading
         const insertedSignal = database.insertSignal(parsed);
         if (insertedSignal) {
+          // Initialiser la position pyramidale
+          portfolio.initPosition(insertedSignal.id);
           // Recuperer le prix reel d'entree depuis Binance
           await fetchAndStoreEntryPrice(insertedSignal);
           // Notifier via le bot
@@ -230,13 +232,20 @@ async function handleMessage(message) {
         break;
 
       case 'confirmation':
-        // Target atteint
+        // Target atteint - execution pyramidale
         const insertedConfirmation = database.insertConfirmation(parsed);
         if (insertedConfirmation && insertedConfirmation.signalId) {
           // Recuperer le prix reel de sortie depuis Binance et comparer
           await fetchAndStoreExitPrice(insertedConfirmation.signalId, parsed.profitPct);
-          // Mettre a jour le portefeuille immediatement
-          portfolio.processTradeForPortfolio(insertedConfirmation.signalId);
+          // Executer la fermeture partielle pyramidale
+          const tpResult = portfolio.executePyramidTP(
+            insertedConfirmation.signalId,
+            parsed.targetNumber,
+            parsed.profitPct
+          );
+          if (tpResult) {
+            logger.info(`[TRADE] ${parsed.pair} TP${parsed.targetNumber} : ferme ${tpResult.percentClosed}% | profit=${tpResult.profitNet >= 0 ? '+' : ''}${tpResult.profitNet.toFixed(2)}$ | restant=${tpResult.remainingPercent}%`);
+          }
           await reporter.notifyConfirmation(parsed);
         }
         break;
@@ -247,15 +256,22 @@ async function handleMessage(message) {
         break;
 
       case 'stop_loss':
-        // Stop loss touche
+        // Stop loss touche - fermer position restante via pyramide
         database.insertStopLoss(parsed);
-        // Mettre a jour le portefeuille immediatement
         if (parsed.pair) {
-          const slSignal = database.getSignals('sl_hit').find(s => s.pair === parsed.pair);
+          // Trouver le signal concerne (le plus recent open/partial pour cette paire)
+          const allSignals = database.getSignals();
+          const slSignal = allSignals.find(s =>
+            s.pair === parsed.pair && ['open', 'partial'].includes(s.status)
+          );
           if (slSignal) {
             // Recuperer le prix reel de sortie depuis Binance
-            await fetchAndStoreExitPrice(slSignal.id, slSignal.final_profit_pct);
-            portfolio.processTradeForPortfolio(slSignal.id);
+            await fetchAndStoreExitPrice(slSignal.id, parsed.lossPct);
+            // Executer le stop loss pyramidal (ferme 100% restant)
+            const slResult = portfolio.executePyramidSL(slSignal.id, parsed.lossPct);
+            if (slResult) {
+              logger.info(`[TRADE] ${parsed.pair} SL : ferme ${slResult.percentClosed}% restant | perte=-${slResult.lossNet.toFixed(2)}$ | P&L total=${slResult.pnlTotal.toFixed(2)}$`);
+            }
           }
         }
         await reporter.notifyStopLoss(parsed);

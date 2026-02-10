@@ -1,29 +1,38 @@
 // ============================================================
-// portfolio-simulator.js - Simulation de portefeuille virtuel
+// portfolio-simulator.js - Simulation de portefeuille pyramidal
 // ============================================================
-// Simule un portefeuille de trading virtuel qui part d'un capital
-// initial et applique chaque trade avec :
-// - Position sizing (% du capital ACTUEL)
-// - Frais de transaction (entree + sortie)
-// - Stop loss = liquidation de la position
+// Strategie pyramidale multi-TP :
+//   TP1 = fermer 35% de la position
+//   TP2 = fermer 22.5%
+//   TP3 = fermer 17.5%
+//   TP4 = fermer 10%
+//   TP5+ = fermer les 15% restants
 //
-// IMPORTANT : Le profit est base sur le profit % Telegram avec une
-// marge de securite de 15% :
-// - Gains : profit Telegram × 0.85 (reduit de 15%)
-// - Pertes : perte Telegram × 1.15 (amplifiee de 15%)
-// Cela tient compte de la latence, du slippage et des conditions reelles.
-//
+// Marge de securite -15% sur les gains, +15% sur les pertes.
 // Le capital ne peut jamais etre negatif.
 // ============================================================
 
 const database = require('./database');
 const logger = require('./logger');
 
-// ---- Configuration par defaut (surchargee par .env) ----
+// ---- Configuration ----
 let config = {
   startCapital: 200,
   maxPositionPct: 10,
   tradingFeePct: 0.5,
+};
+
+// ---- Constantes ----
+const SAFETY_MARGIN_GAINS = 0.85;   // -15% sur les gains
+const SAFETY_MARGIN_LOSSES = 1.15;  // +15% sur les pertes
+
+// Configuration pyramidale : % de la position INITIALE a fermer a chaque TP
+const PYRAMID_CONFIG = {
+  1: 35,    // TP1 = 35%
+  2: 22.5,  // TP2 = 22.5%
+  3: 17.5,  // TP3 = 17.5%
+  4: 10,    // TP4 = 10%
+  5: 15,    // TP5+ = 15% (reste)
 };
 
 /**
@@ -38,221 +47,277 @@ function configure(cfg) {
 }
 
 /**
- * Calcule la taille de position maximale.
- * @param {number} capital - Capital disponible actuel
- * @returns {number} Taille de position en dollars
- */
-function calculatePositionSize(capital) {
-  return Math.max(0, capital * (config.maxPositionPct / 100));
-}
-
-/**
  * Calcule les frais de transaction.
- * @param {number} amount - Montant de base (pas l'exposition leveragee)
+ * @param {number} amount - Montant de base
  * @returns {number} Frais en dollars
  */
 function calculateFee(amount) {
-  return amount * (config.tradingFeePct / 100);
+  return Math.abs(amount) * (config.tradingFeePct / 100);
 }
 
+// ============================================================
+// INITIALISATION DE POSITION
+// ============================================================
+
 /**
- * Calcule l'impact d'un trade sur le portefeuille.
+ * Initialise une position pyramidale pour un nouveau signal.
+ * Calcule position_size_initial en fonction du capital disponible.
  *
- * Utilise profit_calculated (profit Telegram × marge de securite).
- *
- * Logique :
- * - Si TP hit : profitBrut = positionSize × (profitCalculated / 100)
- * - Si SL hit : perte = positionSize × |profitCalculated| / 100 + frais (cappee a 100%)
- * - Frais : entry sur la position de base, exit sur la valeur finale
- *
- * @param {Object} signal - Signal depuis la BDD
- * @param {number} currentCapital - Capital ACTUEL avant ce trade
- * @returns {Object} { positionSize, feesEntry, feesExit, feesTotal, profitBrut, profitNet, capitalAfter, isWin }
+ * @param {number} signalId - ID du signal insere
+ * @returns {number} Taille de position initiale en $
  */
-function calculateTradeImpact(signal, currentCapital) {
-  // Taille de position = maxPositionPct% du capital ACTUEL
-  const positionSize = calculatePositionSize(currentCapital);
+function initPosition(signalId) {
+  const currentCapital = database.getLastPortfolioCapital(config.startCapital);
+  const exposure = database.getOpenExposure();
+  const availableCapital = Math.max(0, currentCapital - exposure);
 
-  // Si capital trop faible pour ouvrir une position
-  if (positionSize < 0.01) {
-    logger.warn(`Capital insuffisant (${currentCapital.toFixed(2)}$) pour ouvrir une position`);
-    return {
-      positionSize: 0,
-      feesEntry: 0,
-      feesExit: 0,
-      feesTotal: 0,
-      profitBrut: 0,
-      profitNet: 0,
-      capitalAfter: currentCapital,
-      isWin: false,
-      skipped: true,
-    };
+  const positionSizeInitial = Math.max(0, availableCapital * (config.maxPositionPct / 100));
+
+  if (positionSizeInitial < 0.01) {
+    logger.warn(`[PYRAMID] Capital disponible insuffisant (${availableCapital.toFixed(2)}$) pour signal #${signalId}`);
+    return 0;
   }
 
-  // Frais d'entree (sur la position de base)
-  const feesEntry = calculateFee(positionSize);
+  database.initSignalPosition(signalId, positionSizeInitial);
 
-  if (signal.status === 'sl_hit') {
-    // ---- STOP LOSS ----
-    // Utiliser profit_calculated (perte Telegram × 1.15)
-    let lossPct = 100; // Fallback : liquidation totale si pas de donnees
+  logger.info(`[PYRAMID] Signal #${signalId} : position=${positionSizeInitial.toFixed(2)}$ | capital=${currentCapital.toFixed(2)}$ | exposure=${exposure.toFixed(2)}$ | disponible=${availableCapital.toFixed(2)}$`);
+  return positionSizeInitial;
+}
 
-    if (signal.profit_calculated !== null && signal.profit_calculated !== undefined) {
-      // profit_calculated est negatif pour un SL -> valeur absolue
-      lossPct = Math.abs(signal.profit_calculated);
-    } else if (signal.final_profit_pct !== null && signal.final_profit_pct !== undefined) {
-      // Fallback : utiliser final_profit_pct Telegram × marge
-      lossPct = Math.abs(signal.final_profit_pct) * 1.15;
-    }
+// ============================================================
+// EXECUTION PYRAMIDALE - TAKE PROFIT
+// ============================================================
 
-    // La perte ne peut pas depasser 100% de la position (pas de dette)
-    lossPct = Math.min(lossPct, 100);
-
-    const lossAmount = positionSize * (lossPct / 100);
-    const lossTotal = lossAmount + feesEntry;
-    const capitalAfter = Math.max(0, currentCapital - lossTotal);
-
-    logger.info(`[PORTFOLIO] SL ${signal.pair} : position=${positionSize.toFixed(2)}$ | -${lossPct.toFixed(2)}% | perte=-${lossTotal.toFixed(2)}$ | capital=${currentCapital.toFixed(2)}$ → ${capitalAfter.toFixed(2)}$`);
-
-    return {
-      positionSize,
-      feesEntry,
-      feesExit: 0,
-      feesTotal: feesEntry,
-      profitBrut: -lossAmount,
-      profitNet: -lossTotal,
-      capitalAfter,
-      isWin: false,
-      skipped: false,
-    };
+/**
+ * Execute une fermeture partielle pyramidale lors d'un TP.
+ *
+ * @param {number} signalId - ID du signal
+ * @param {number} targetNumber - Numero du target (1-5+)
+ * @param {number} telegramProfitPct - Profit % rapporte par Telegram (inclut leverage)
+ * @returns {Object|null} Details de l'execution ou null si erreur
+ */
+function executePyramidTP(signalId, targetNumber, telegramProfitPct) {
+  const signal = database.getSignalById(signalId);
+  if (!signal) {
+    logger.warn(`[PYRAMID] Signal #${signalId} non trouve`);
+    return null;
   }
 
-  if (['tp_hit', 'all_tp_hit'].includes(signal.status)) {
-    // ---- TAKE PROFIT ----
-    // Utiliser profit_calculated (profit Telegram × 0.85)
-    let profitPct = 0;
-    if (signal.profit_calculated !== null && signal.profit_calculated !== undefined) {
-      profitPct = Math.abs(signal.profit_calculated);
-    } else if (signal.final_profit_pct !== null && signal.final_profit_pct !== undefined) {
-      // Fallback : utiliser final_profit_pct Telegram × marge
-      profitPct = Math.abs(signal.final_profit_pct) * 0.85;
-    }
-
-    // Profit brut = position × (profitPct / 100)
-    // profitPct = profit Telegram avec marge de securite (-15%)
-    const profitBrut = positionSize * (profitPct / 100);
-
-    // Valeur finale de la position
-    const valeurFinale = positionSize + profitBrut;
-
-    // Frais de sortie (sur la valeur finale)
-    const feesExit = calculateFee(valeurFinale);
-
-    // Profit net = profit brut - frais entree - frais sortie
-    const profitNet = profitBrut - feesEntry - feesExit;
-
-    const capitalAfter = currentCapital + profitNet;
-
-    logger.info(`[PORTFOLIO] TP ${signal.pair} : position=${positionSize.toFixed(2)}$ | +${profitPct.toFixed(2)}% (marge -15%) | profit net=+${profitNet.toFixed(2)}$ | capital=${currentCapital.toFixed(2)}$ → ${capitalAfter.toFixed(2)}$`);
-
-    return {
-      positionSize,
-      feesEntry,
-      feesExit,
-      feesTotal: feesEntry + feesExit,
-      profitBrut,
-      profitNet,
-      capitalAfter,
-      isWin: true,
-      skipped: false,
-    };
+  // Verifier que la position est initialisee
+  if (!signal.position_size_initial || signal.position_size_initial <= 0) {
+    logger.warn(`[PYRAMID] Signal #${signalId} : position non initialisee`);
+    return null;
   }
 
-  // Trade annule ou en cours : pas d'impact
+  // Determiner le % a fermer selon la pyramide
+  const percentToClose = PYRAMID_CONFIG[targetNumber] || 15;
+
+  // Si le restant est insuffisant, fermer tout ce qui reste
+  const actualPercentToClose = Math.min(percentToClose, signal.position_remaining_percent || 100);
+  if (actualPercentToClose <= 0) {
+    logger.info(`[PYRAMID] Signal #${signalId} : position deja entierement fermee`);
+    return null;
+  }
+
+  // Taille de la portion a fermer (% de la position INITIALE)
+  const sizeToClose = signal.position_size_initial * (actualPercentToClose / 100);
+
+  // Appliquer marge de securite sur le profit Telegram
+  const safeProfitPct = telegramProfitPct * SAFETY_MARGIN_GAINS;
+
+  // Calcul profit $ sur cette portion
+  const feeEntry = calculateFee(sizeToClose);
+  const profitBrut = sizeToClose * (safeProfitPct / 100);
+  const feeExit = calculateFee(sizeToClose + profitBrut);
+  const profitNet = profitBrut - feeEntry - feeExit;
+
+  // Enregistrer l'execution
+  database.insertTradeExecution({
+    signalId,
+    targetNumber,
+    targetPrice: null, // sera mis a jour par Binance si disponible
+    positionClosedPercent: actualPercentToClose,
+    positionClosedSize: sizeToClose,
+    profitRealized: profitNet,
+    profitRealizedPercent: safeProfitPct,
+  });
+
+  // Calculer nouveaux totaux
+  const newRemainingPercent = Math.max(0, (signal.position_remaining_percent || 100) - actualPercentToClose);
+  const newRemainingSize = signal.position_size_initial * (newRemainingPercent / 100);
+  const newProfitRealizedTotal = (signal.profit_realized_total || 0) + profitNet;
+
+  // P&L latent sur position restante (estimation au meme profit %)
+  let profitLatent = 0;
+  if (newRemainingSize > 0) {
+    const latentProfitBrut = newRemainingSize * (safeProfitPct / 100);
+    profitLatent = latentProfitBrut - calculateFee(newRemainingSize) - calculateFee(newRemainingSize + latentProfitBrut);
+  }
+
+  const pnlTotal = newProfitRealizedTotal + profitLatent;
+  const newStatus = newRemainingPercent <= 0 ? 'closed' : 'partial';
+
+  // Mettre a jour le signal
+  database.updateSignalPyramidState(signalId, {
+    positionRemainingPercent: newRemainingPercent,
+    positionRemainingSize: newRemainingSize,
+    profitRealizedTotal: newProfitRealizedTotal,
+    profitLatent,
+    pnlTotal,
+    status: newStatus,
+  });
+
+  // Mettre a jour le capital du portefeuille
+  const capitalBefore = database.getLastPortfolioCapital(config.startCapital);
+  const capitalAfter = capitalBefore + profitNet;
+  database.updateSignalPortfolio(signalId, {
+    virtualPortfolioBefore: capitalBefore,
+    virtualPortfolioAfter: capitalAfter,
+    positionSize: signal.position_size_initial,
+    tradingFeesTotal: feeEntry + feeExit,
+    netProfitLoss: profitNet,
+  });
+
+  logger.info(`[PYRAMID] TP${targetNumber} signal #${signalId} ${signal.pair} : ferme ${actualPercentToClose}% (${sizeToClose.toFixed(2)}$) | profit=${profitNet >= 0 ? '+' : ''}${profitNet.toFixed(2)}$ | restant=${newRemainingPercent}% | capital=${capitalAfter.toFixed(2)}$`);
+
   return {
-    positionSize: 0,
-    feesEntry: 0,
-    feesExit: 0,
-    feesTotal: 0,
-    profitBrut: 0,
-    profitNet: 0,
-    capitalAfter: currentCapital,
-    isWin: false,
-    skipped: true,
+    signalId,
+    targetNumber,
+    percentClosed: actualPercentToClose,
+    sizeClosed: sizeToClose,
+    profitPctSafe: safeProfitPct,
+    profitNet,
+    remainingPercent: newRemainingPercent,
+    remainingSize: newRemainingSize,
+    profitRealizedTotal: newProfitRealizedTotal,
+    profitLatent,
+    pnlTotal,
+    status: newStatus,
+    capitalAfter,
   };
 }
 
+// ============================================================
+// EXECUTION PYRAMIDALE - STOP LOSS
+// ============================================================
+
 /**
- * Traite un trade cloture (TP ou SL) et met a jour le portefeuille immediatement.
- * Utilise le capital actuel depuis la BDD (dernier virtual_portfolio_after).
+ * Execute la fermeture stop loss (100% de la position restante).
  *
- * @param {number} signalId - ID du signal cloture
- * @returns {Object|null} Impact du trade ou null si non applicable
+ * @param {number} signalId - ID du signal
+ * @param {number|null} telegramLossPct - Perte % rapportee par Telegram (positif = perte)
+ * @returns {Object|null} Details de l'execution ou null si erreur
  */
-function processTradeForPortfolio(signalId) {
+function executePyramidSL(signalId, telegramLossPct) {
   const signal = database.getSignalById(signalId);
   if (!signal) {
-    logger.warn(`[PORTFOLIO] Signal #${signalId} non trouve`);
+    logger.warn(`[PYRAMID] SL Signal #${signalId} non trouve`);
     return null;
   }
 
-  // Verifier que le signal est bien cloture (TP ou SL)
-  if (!['tp_hit', 'all_tp_hit', 'sl_hit'].includes(signal.status)) {
+  if (!signal.position_size_initial || signal.position_size_initial <= 0) {
+    logger.warn(`[PYRAMID] SL Signal #${signalId} : position non initialisee`);
     return null;
   }
 
-  // Verifier que ce trade n'a pas deja ete calcule
-  if (signal.virtual_portfolio_after !== null) {
-    logger.info(`[PORTFOLIO] Signal #${signalId} deja calcule, skip`);
+  const remainingPercent = signal.position_remaining_percent || 100;
+  const remainingSize = signal.position_remaining_size || signal.position_size_initial;
+
+  if (remainingPercent <= 0 || remainingSize <= 0) {
+    logger.info(`[PYRAMID] SL Signal #${signalId} : position deja fermee`);
     return null;
   }
 
-  // Capital actuel = dernier virtual_portfolio_after ou capital initial
-  const currentCapital = database.getLastPortfolioCapital(config.startCapital);
+  // Calculer la perte
+  // telegramLossPct est le % de perte (inclut leverage), positif = perte
+  let lossPct = telegramLossPct ? Math.abs(telegramLossPct) : 100;
+  lossPct = Math.min(lossPct, 100); // capper a 100%
 
-  const impact = calculateTradeImpact(signal, currentCapital);
-  if (impact.skipped) return null;
+  // Amplifier la perte avec marge de securite
+  const safeLossPct = lossPct * SAFETY_MARGIN_LOSSES;
+  const cappedLossPct = Math.min(safeLossPct, 100); // ne pas depasser 100%
 
-  // Sauvegarder l'impact en BDD
-  database.updateSignalPortfolio(signalId, {
-    virtualPortfolioBefore: currentCapital,
-    virtualPortfolioAfter: impact.capitalAfter,
-    positionSize: impact.positionSize,
-    tradingFeesTotal: impact.feesTotal,
-    netProfitLoss: impact.profitNet,
+  // Calcul perte $ sur la position restante
+  const feeEntry = calculateFee(remainingSize);
+  const lossAmount = remainingSize * (cappedLossPct / 100);
+  const lossNet = lossAmount + feeEntry;
+
+  // Enregistrer l'execution (target_number = 0 pour SL)
+  database.insertTradeExecution({
+    signalId,
+    targetNumber: 0,
+    targetPrice: null,
+    positionClosedPercent: remainingPercent,
+    positionClosedSize: remainingSize,
+    profitRealized: -lossNet,
+    profitRealizedPercent: -cappedLossPct,
   });
 
-  logger.info(`[PORTFOLIO] Trade #${signalId} (${signal.pair}) : ${currentCapital.toFixed(2)}$ → ${impact.capitalAfter.toFixed(2)}$`);
-  return impact;
+  // Calculer nouveaux totaux
+  const newProfitRealizedTotal = (signal.profit_realized_total || 0) - lossNet;
+  const pnlTotal = newProfitRealizedTotal; // plus de latent
+
+  database.updateSignalPyramidState(signalId, {
+    positionRemainingPercent: 0,
+    positionRemainingSize: 0,
+    profitRealizedTotal: newProfitRealizedTotal,
+    profitLatent: 0,
+    pnlTotal,
+    status: 'stopped',
+  });
+
+  // Mettre a jour le capital
+  const capitalBefore = database.getLastPortfolioCapital(config.startCapital);
+  const capitalAfter = Math.max(0, capitalBefore - lossNet);
+  database.updateSignalPortfolio(signalId, {
+    virtualPortfolioBefore: capitalBefore,
+    virtualPortfolioAfter: capitalAfter,
+    positionSize: signal.position_size_initial,
+    tradingFeesTotal: feeEntry,
+    netProfitLoss: -lossNet,
+  });
+
+  logger.info(`[PYRAMID] SL signal #${signalId} ${signal.pair} : ferme ${remainingPercent}% restant (${remainingSize.toFixed(2)}$) | perte=-${lossNet.toFixed(2)}$ (${cappedLossPct.toFixed(1)}%) | P&L total=${pnlTotal.toFixed(2)}$ | capital=${capitalAfter.toFixed(2)}$`);
+
+  return {
+    signalId,
+    percentClosed: remainingPercent,
+    sizeClosed: remainingSize,
+    lossPctSafe: cappedLossPct,
+    lossNet,
+    profitRealizedTotal: newProfitRealizedTotal,
+    pnlTotal,
+    capitalAfter,
+  };
 }
 
+// ============================================================
+// RECALCUL COMPLET
+// ============================================================
+
 /**
- * Recalcule l'historique complet du portefeuille depuis le debut.
- * Parcourt tous les trades termines dans l'ordre chronologique
- * et applique chaque trade pour obtenir l'evolution du capital.
+ * Recalcule l'historique complet du portefeuille avec strategie pyramidale.
+ * Parcourt tous les signaux et leurs evenements (confirmations + SL)
+ * dans l'ordre chronologique.
  *
- * @returns {Object} { history, current, totalFees, winCount, lossCount }
+ * @returns {Object} { history, current, initial, totalGain, totalFees, roi, ... }
  */
 function recalculateAll() {
-  logger.info('[PORTFOLIO] Recalcul complet de l\'historique...');
+  logger.info('[PYRAMID] Recalcul complet...');
 
-  // Recuperer tous les trades termines, du plus ancien au plus recent
-  const closedSignals = database.getClosedSignals();
-  const sorted = [...closedSignals].sort((a, b) =>
-    new Date(a.updated_at || a.created_at) - new Date(b.updated_at || b.created_at)
-  );
-
+  const allSignals = database.getAllSignalsChronological();
+  const history = [];
   let capital = config.startCapital;
   let totalFees = 0;
   let winCount = 0;
   let lossCount = 0;
   let consecutiveLosses = 0;
   let maxConsecutiveLosses = 0;
-  const history = [];
+  const positions = new Map(); // signalId -> position state
 
   // Point de depart
   history.push({
-    date: sorted.length > 0 ? sorted[0].created_at : new Date().toISOString(),
+    date: allSignals.length > 0 ? allSignals[0].created_at : new Date().toISOString(),
     capital: config.startCapital,
     trade: null,
     pair: null,
@@ -261,48 +326,219 @@ function recalculateAll() {
     positionSize: 0,
   });
 
-  for (const signal of sorted) {
-    const impact = calculateTradeImpact(signal, capital);
+  // Collecter tous les evenements (open, tp, sl) et les trier chronologiquement
+  const events = [];
 
-    if (impact.skipped) continue;
+  for (const signal of allSignals) {
+    if (signal.status === 'cancelled') continue;
 
-    // Mettre a jour les colonnes du signal dans la BDD
-    database.updateSignalPortfolio(signal.id, {
-      virtualPortfolioBefore: capital,
-      virtualPortfolioAfter: impact.capitalAfter,
-      positionSize: impact.positionSize,
-      tradingFeesTotal: impact.feesTotal,
-      netProfitLoss: impact.profitNet,
+    // Evenement d'ouverture
+    events.push({
+      type: 'open',
+      time: signal.created_at,
+      signalId: signal.id,
+      signal,
     });
 
-    capital = impact.capitalAfter;
-    totalFees += impact.feesTotal;
-
-    if (impact.isWin) {
-      winCount++;
-      consecutiveLosses = 0;
-    } else {
-      lossCount++;
-      consecutiveLosses++;
-      if (consecutiveLosses > maxConsecutiveLosses) {
-        maxConsecutiveLosses = consecutiveLosses;
-      }
+    // Confirmations (TP)
+    const confirmations = database.getConfirmations(signal.id);
+    for (const conf of confirmations) {
+      events.push({
+        type: 'tp',
+        time: conf.created_at,
+        signalId: signal.id,
+        signal,
+        targetNumber: conf.target_number,
+        profitPct: conf.profit_pct,
+      });
     }
 
-    history.push({
-      date: signal.updated_at || signal.created_at,
-      capital: Math.round(capital * 100) / 100,
-      trade: `${signal.pair} ${signal.direction} X${signal.leverage}`,
-      pair: signal.pair,
-      profitNet: Math.round(impact.profitNet * 100) / 100,
-      fees: Math.round(impact.feesTotal * 100) / 100,
-      positionSize: Math.round(impact.positionSize * 100) / 100,
-    });
+    // Stop losses
+    const slRows = getStopLossesForSignal(signal.id);
+    for (const sl of slRows) {
+      events.push({
+        type: 'sl',
+        time: sl.created_at,
+        signalId: signal.id,
+        signal,
+        lossPct: sl.loss_pct,
+      });
+    }
+  }
+
+  // Trier par date
+  events.sort((a, b) => new Date(a.time) - new Date(b.time));
+
+  // Traiter chaque evenement
+  for (const event of events) {
+    const sig = event.signal;
+
+    switch (event.type) {
+      case 'open': {
+        const exposure = Array.from(positions.values())
+          .reduce((sum, p) => sum + p.remainingSize, 0);
+        const available = Math.max(0, capital - exposure);
+        const posSize = Math.max(0, available * (config.maxPositionPct / 100));
+
+        positions.set(event.signalId, {
+          positionSizeInitial: posSize,
+          remainingPercent: 100,
+          remainingSize: posSize,
+          profitRealizedTotal: 0,
+        });
+
+        // Stocker dans la BDD
+        if (posSize > 0) {
+          database.initSignalPosition(event.signalId, posSize);
+        }
+        break;
+      }
+
+      case 'tp': {
+        const pos = positions.get(event.signalId);
+        if (!pos || pos.remainingPercent <= 0 || pos.positionSizeInitial <= 0) break;
+
+        const percentToClose = PYRAMID_CONFIG[event.targetNumber] || 15;
+        const actualPercent = Math.min(percentToClose, pos.remainingPercent);
+        if (actualPercent <= 0) break;
+
+        const sizeToClose = pos.positionSizeInitial * (actualPercent / 100);
+        const safeProfitPct = event.profitPct * SAFETY_MARGIN_GAINS;
+
+        const feeEntry = calculateFee(sizeToClose);
+        const profitBrut = sizeToClose * (safeProfitPct / 100);
+        const feeExit = calculateFee(sizeToClose + profitBrut);
+        const profitNet = profitBrut - feeEntry - feeExit;
+        const fees = feeEntry + feeExit;
+
+        // Mettre a jour la position
+        pos.remainingPercent = Math.max(0, pos.remainingPercent - actualPercent);
+        pos.remainingSize = pos.positionSizeInitial * (pos.remainingPercent / 100);
+        pos.profitRealizedTotal += profitNet;
+
+        capital += profitNet;
+        totalFees += fees;
+        winCount++;
+        consecutiveLosses = 0;
+
+        // Enregistrer l'execution
+        database.insertTradeExecution({
+          signalId: event.signalId,
+          targetNumber: event.targetNumber,
+          targetPrice: null,
+          positionClosedPercent: actualPercent,
+          positionClosedSize: sizeToClose,
+          profitRealized: profitNet,
+          profitRealizedPercent: safeProfitPct,
+        });
+
+        // Determiner le statut
+        const newStatus = pos.remainingPercent <= 0 ? 'closed' : 'partial';
+
+        // Mettre a jour la BDD
+        database.updateSignalPyramidState(event.signalId, {
+          positionRemainingPercent: pos.remainingPercent,
+          positionRemainingSize: pos.remainingSize,
+          profitRealizedTotal: pos.profitRealizedTotal,
+          profitLatent: 0,
+          pnlTotal: pos.profitRealizedTotal,
+          status: newStatus,
+        });
+
+        database.updateSignalPortfolio(event.signalId, {
+          virtualPortfolioBefore: capital - profitNet,
+          virtualPortfolioAfter: capital,
+          positionSize: pos.positionSizeInitial,
+          tradingFeesTotal: fees,
+          netProfitLoss: profitNet,
+        });
+
+        history.push({
+          date: event.time,
+          capital: Math.round(capital * 100) / 100,
+          trade: `${sig.pair} ${sig.direction} X${sig.leverage} TP${event.targetNumber} (${actualPercent}%)`,
+          pair: sig.pair,
+          profitNet: Math.round(profitNet * 100) / 100,
+          fees: Math.round(fees * 100) / 100,
+          positionSize: Math.round(sizeToClose * 100) / 100,
+        });
+        break;
+      }
+
+      case 'sl': {
+        const pos = positions.get(event.signalId);
+        if (!pos || pos.remainingPercent <= 0 || pos.positionSizeInitial <= 0) break;
+
+        const remainingSize = pos.remainingSize;
+        let lossPct = event.lossPct ? Math.abs(event.lossPct) : 100;
+        lossPct = Math.min(lossPct, 100);
+        const safeLossPct = Math.min(lossPct * SAFETY_MARGIN_LOSSES, 100);
+
+        const feeEntry = calculateFee(remainingSize);
+        const lossAmount = remainingSize * (safeLossPct / 100);
+        const lossNet = lossAmount + feeEntry;
+        const fees = feeEntry;
+
+        pos.profitRealizedTotal -= lossNet;
+        pos.remainingPercent = 0;
+        pos.remainingSize = 0;
+
+        capital = Math.max(0, capital - lossNet);
+        totalFees += fees;
+        lossCount++;
+        consecutiveLosses++;
+        if (consecutiveLosses > maxConsecutiveLosses) {
+          maxConsecutiveLosses = consecutiveLosses;
+        }
+
+        database.insertTradeExecution({
+          signalId: event.signalId,
+          targetNumber: 0,
+          targetPrice: null,
+          positionClosedPercent: pos.remainingPercent || (positions.get(event.signalId) ? 100 : 0),
+          positionClosedSize: remainingSize,
+          profitRealized: -lossNet,
+          profitRealizedPercent: -safeLossPct,
+        });
+
+        database.updateSignalPyramidState(event.signalId, {
+          positionRemainingPercent: 0,
+          positionRemainingSize: 0,
+          profitRealizedTotal: pos.profitRealizedTotal,
+          profitLatent: 0,
+          pnlTotal: pos.profitRealizedTotal,
+          status: 'stopped',
+        });
+
+        database.updateSignalPortfolio(event.signalId, {
+          virtualPortfolioBefore: capital + lossNet,
+          virtualPortfolioAfter: capital,
+          positionSize: pos.positionSizeInitial,
+          tradingFeesTotal: fees,
+          netProfitLoss: -lossNet,
+        });
+
+        history.push({
+          date: event.time,
+          capital: Math.round(capital * 100) / 100,
+          trade: `${sig.pair} ${sig.direction} X${sig.leverage} SL`,
+          pair: sig.pair,
+          profitNet: Math.round(-lossNet * 100) / 100,
+          fees: Math.round(fees * 100) / 100,
+          positionSize: Math.round(remainingSize * 100) / 100,
+        });
+        break;
+      }
+    }
   }
 
   const roi = config.startCapital > 0
     ? ((capital - config.startCapital) / config.startCapital) * 100
     : 0;
+
+  // Calculer l'exposition actuelle
+  const totalExposure = Array.from(positions.values())
+    .reduce((sum, p) => sum + p.remainingSize, 0);
 
   const result = {
     history,
@@ -319,10 +555,20 @@ function recalculateAll() {
     totalTrades: winCount + lossCount,
     consecutiveLosses,
     maxConsecutiveLosses,
+    exposure: Math.round(totalExposure * 100) / 100,
   };
 
-  logger.info(`[PORTFOLIO] Recalcul terminé : ${result.totalTrades} trades | Capital: ${result.current}$ | ROI: ${result.roi}%`);
+  logger.info(`[PYRAMID] Recalcul termine : ${result.totalTrades} executions | Capital: ${result.current}$ | ROI: ${result.roi}% | Exposure: ${result.exposure}$`);
   return result;
+}
+
+/**
+ * Recupere les stop losses pour un signal donné.
+ * @param {number} signalId
+ * @returns {Array}
+ */
+function getStopLossesForSignal(signalId) {
+  return database.getStopLosses(signalId);
 }
 
 /**
@@ -350,19 +596,19 @@ function getBestWorstTrades() {
 }
 
 /**
- * Verifie les alertes a envoyer (capital bas, pertes consecutives).
- * @returns {Array<string>} Messages d'alerte a envoyer
+ * Verifie les alertes a envoyer.
+ * @returns {Array<string>} Messages d'alerte
  */
 function checkAlerts() {
   const snapshot = recalculateAll();
   const alerts = [];
 
   if (snapshot.current < 20 && snapshot.current > 0) {
-    alerts.push(`⚠️ *Capital insuffisant !*\nCapital actuel : ${snapshot.current.toFixed(2)}$\nImpossible d'ouvrir de nouvelles positions.`);
+    alerts.push(`Capital insuffisant ! Capital actuel : ${snapshot.current.toFixed(2)}$`);
   }
 
   if (snapshot.consecutiveLosses >= 3) {
-    alerts.push(`⚠️ *${snapshot.consecutiveLosses} pertes consecutives !*\nCapital actuel : ${snapshot.current.toFixed(2)}$\nRevision de strategie recommandee.`);
+    alerts.push(`${snapshot.consecutiveLosses} pertes consecutives ! Capital : ${snapshot.current.toFixed(2)}$`);
   }
 
   return alerts;
@@ -370,12 +616,15 @@ function checkAlerts() {
 
 module.exports = {
   configure,
-  calculatePositionSize,
   calculateFee,
-  calculateTradeImpact,
-  processTradeForPortfolio,
+  initPosition,
+  executePyramidTP,
+  executePyramidSL,
   recalculateAll,
   getPortfolioSnapshot,
   getBestWorstTrades,
   checkAlerts,
+  PYRAMID_CONFIG,
+  SAFETY_MARGIN_GAINS,
+  SAFETY_MARGIN_LOSSES,
 };

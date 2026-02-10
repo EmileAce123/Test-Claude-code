@@ -2,7 +2,7 @@
 // recalculate-portfolio.js - Recalcul complet du portefeuille
 // ============================================================
 // RESET puis recalcule l'historique complet du portefeuille
-// virtuel a partir de tous les trades existants dans la BDD.
+// virtuel avec la strategie pyramidale multi-TP.
 //
 // Usage : node src/scripts/recalculate-portfolio.js
 // ============================================================
@@ -11,7 +11,7 @@ const config = require('../../config/config');
 const database = require('../database');
 const portfolio = require('../portfolio-simulator');
 
-console.log('=== Recalcul du portefeuille virtuel ===\n');
+console.log('=== Recalcul du portefeuille virtuel (strategie pyramidale) ===\n');
 
 // Initialiser la BDD
 database.init(config.database.path);
@@ -19,16 +19,12 @@ database.init(config.database.path);
 // Configurer le simulateur
 portfolio.configure(config.portfolio);
 
-// ETAPE 1 : Effacer toutes les anciennes valeurs de portefeuille
-console.log('[1/3] Reset des colonnes portfolio...');
+// ETAPE 1 : Effacer toutes les anciennes valeurs de portefeuille et executions
+console.log('[1/2] Reset des colonnes portfolio et executions pyramidales...');
 database.resetPortfolioData();
 
-// ETAPE 2 : Recalculer profit_calculated (profit Telegram × marge de securite)
-console.log('[2/3] Recalcul profit avec marge de securite (gains -15%, pertes +15%)...');
-database.recalculateAllPrices();
-
-// ETAPE 3 : Recalculer le portefeuille virtuel depuis zero
-console.log('[3/3] Recalcul complet du portefeuille...\n');
+// ETAPE 2 : Recalculer le portefeuille virtuel avec strategie pyramidale
+console.log('[2/2] Recalcul complet du portefeuille (pyramide multi-TP)...\n');
 const result = portfolio.recalculateAll();
 
 console.log('\n--- Resultat ---');
@@ -40,6 +36,7 @@ console.log(`Frais cumules   : ${result.totalFees.toFixed(2)}$`);
 console.log(`Trades          : ${result.totalTrades} (${result.winCount}W / ${result.lossCount}L)`);
 console.log(`Win Rate        : ${result.winRate}%`);
 console.log(`Pertes consec.  : max ${result.maxConsecutiveLosses}`);
+console.log(`Exposition      : ${result.exposure}$`);
 
 console.log('\n--- Historique ---');
 for (const h of result.history) {
