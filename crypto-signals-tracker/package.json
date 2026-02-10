@@ -10,7 +10,8 @@
     "dashboard": "node src/dashboard/server.js",
     "recalculate-portfolio": "node src/scripts/recalculate-portfolio.js",
     "reset-portfolio": "node src/scripts/reset-portfolio.js",
-    "portfolio-stats": "node src/scripts/portfolio-stats.js"
+    "portfolio-stats": "node src/scripts/portfolio-stats.js",
+    "test-binance": "node src/scripts/test-binance-api.js"
   },
   "keywords": [
     "telegram",
@@ -22,6 +23,7 @@
   "license": "ISC",
   "dependencies": {
     "better-sqlite3": "^11.7.0",
+    "binance-api-node": "^0.12.5",
     "dotenv": "^16.4.7",
     "express": "^5.2.1",
     "express-session": "^1.19.0",

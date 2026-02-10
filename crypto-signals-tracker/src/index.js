@@ -20,6 +20,7 @@ const signalParser = require('./signal-parser');
 const database = require('./database');
 const reporter = require('./reporter');
 const portfolio = require('./portfolio-simulator');
+const binanceClient = require('./binance-client');
 const logger = require('./logger');
 
 /**
@@ -35,6 +36,20 @@ async function main() {
   // ---- Etape 2 : Configurer le portefeuille virtuel ----
   logger.info('[2/6] Configuration du portefeuille virtuel...');
   portfolio.configure(config.portfolio);
+
+  // ---- Etape 2b : Initialiser le client Binance (lecture seule) ----
+  logger.info('[2b/6] Initialisation du client Binance...');
+  binanceClient.init();
+  if (binanceClient.isReady()) {
+    const binanceOk = await binanceClient.testConnection();
+    if (binanceOk) {
+      logger.info('Client Binance connecte (prix reels actifs)');
+    } else {
+      logger.warn('Client Binance : connexion echouee, fallback sur profit Telegram');
+    }
+  } else {
+    logger.warn('Client Binance non configure (cles API manquantes), fallback sur profit Telegram');
+  }
 
   // ---- Etape 3 : Connexion au compte Telegram (MTProto) ----
   logger.info('[3/6] Connexion a Telegram (votre compte)...');
@@ -98,6 +113,93 @@ async function main() {
   }, 30 * 60 * 1000).unref();
 }
 
+// ============================================================
+// INTEGRATION BINANCE - PRIX REELS (lecture seule)
+// ============================================================
+
+/**
+ * Recupere et stocke le prix d'entree reel depuis Binance lors d'un nouveau signal.
+ * @param {Object} insertedSignal - Signal insere dans la BDD (avec id et pair)
+ */
+async function fetchAndStoreEntryPrice(insertedSignal) {
+  if (!binanceClient.isReady()) return;
+
+  try {
+    const symbol = binanceClient.normalizeSymbol(insertedSignal.pair);
+    const entryPriceReal = await binanceClient.getCurrentPrice(symbol);
+
+    if (entryPriceReal) {
+      database.updateSignalBinancePrices(insertedSignal.id, { entryPriceReal });
+      logger.info(`[BINANCE] Signal #${insertedSignal.id} ${insertedSignal.pair} : prix entree reel = $${entryPriceReal}`);
+
+      // Recuperer et stocker l'ATR pour reference (Phase 2)
+      const candles = await binanceClient.getCandles(symbol, '15m', 15);
+      if (candles) {
+        const atrValue = binanceClient.calculateATR(candles);
+        if (atrValue) {
+          database.updateSignalBinancePrices(insertedSignal.id, { atrValue });
+          logger.info(`[BINANCE] Signal #${insertedSignal.id} ATR(15m) = ${atrValue.toFixed(8)}`);
+        }
+      }
+    } else {
+      logger.warn(`[BINANCE] Prix introuvable pour ${symbol} (deliste ou erreur)`);
+    }
+  } catch (err) {
+    logger.error(`[BINANCE] Erreur fetchAndStoreEntryPrice: ${err.message}`);
+  }
+}
+
+/**
+ * Recupere le prix de sortie reel depuis Binance et calcule le profit reel.
+ * Compare le profit reel avec le profit Telegram pour validation.
+ * @param {number} signalId - ID du signal en BDD
+ * @param {number} telegramProfit - Profit % rapporte par Telegram
+ */
+async function fetchAndStoreExitPrice(signalId, telegramProfit) {
+  if (!binanceClient.isReady()) return;
+
+  try {
+    const signal = database.getSignalById(signalId);
+    if (!signal) return;
+
+    const symbol = binanceClient.normalizeSymbol(signal.pair);
+    const exitPriceReal = await binanceClient.getCurrentPrice(symbol);
+
+    if (!exitPriceReal) {
+      logger.warn(`[BINANCE] Prix sortie introuvable pour ${symbol}`);
+      return;
+    }
+
+    const updateData = { exitPriceReal };
+
+    // Calculer le profit reel si on a le prix d'entree reel
+    if (signal.entry_price_real) {
+      let profitPercent;
+      if (signal.direction === 'LONG') {
+        profitPercent = ((exitPriceReal - signal.entry_price_real) / signal.entry_price_real) * 100;
+      } else {
+        profitPercent = ((signal.entry_price_real - exitPriceReal) / signal.entry_price_real) * 100;
+      }
+
+      const leverage = signal.leverage || 1;
+      const profitReal = Math.round(profitPercent * leverage * 100) / 100;
+      updateData.profitReal = profitReal;
+
+      // Log de comparaison Telegram vs reel
+      logger.info(`[BINANCE] Signal #${signalId} ${signal.pair} comparaison :`);
+      logger.info(`  Telegram : ${telegramProfit}%`);
+      logger.info(`  Reel     : ${profitReal}% (entry=$${signal.entry_price_real}, exit=$${exitPriceReal}, ${signal.direction} X${leverage})`);
+      logger.info(`  Ecart    : ${Math.abs((telegramProfit || 0) - profitReal).toFixed(2)}%`);
+    } else {
+      logger.info(`[BINANCE] Signal #${signalId} : pas de prix entree reel, exit=$${exitPriceReal} stocke pour reference`);
+    }
+
+    database.updateSignalBinancePrices(signalId, updateData);
+  } catch (err) {
+    logger.error(`[BINANCE] Erreur fetchAndStoreExitPrice: ${err.message}`);
+  }
+}
+
 /**
  * Traite chaque message recu d'un groupe cible.
  * Parse le message et l'enregistre dans la base de donnees.
@@ -120,6 +222,8 @@ async function handleMessage(message) {
         // Nouveau signal de trading
         const insertedSignal = database.insertSignal(parsed);
         if (insertedSignal) {
+          // Recuperer le prix reel d'entree depuis Binance
+          await fetchAndStoreEntryPrice(insertedSignal);
           // Notifier via le bot
           await reporter.notifyNewSignal(parsed);
         }
@@ -129,6 +233,8 @@ async function handleMessage(message) {
         // Target atteint
         const insertedConfirmation = database.insertConfirmation(parsed);
         if (insertedConfirmation && insertedConfirmation.signalId) {
+          // Recuperer le prix reel de sortie depuis Binance et comparer
+          await fetchAndStoreExitPrice(insertedConfirmation.signalId, parsed.profitPct);
           // Mettre a jour le portefeuille immediatement
           portfolio.processTradeForPortfolio(insertedConfirmation.signalId);
           await reporter.notifyConfirmation(parsed);
@@ -147,6 +253,8 @@ async function handleMessage(message) {
         if (parsed.pair) {
           const slSignal = database.getSignals('sl_hit').find(s => s.pair === parsed.pair);
           if (slSignal) {
+            // Recuperer le prix reel de sortie depuis Binance
+            await fetchAndStoreExitPrice(slSignal.id, slSignal.final_profit_pct);
             portfolio.processTradeForPortfolio(slSignal.id);
           }
         }

@@ -182,6 +182,11 @@ function runMigrations() {
     { table: 'signals', column: 'entry_price_used', type: 'REAL' },
     { table: 'signals', column: 'exit_price', type: 'REAL' },
     { table: 'signals', column: 'profit_calculated', type: 'REAL' },
+    // Colonnes pour les prix reels Binance (Phase 1 : lecture seule)
+    { table: 'signals', column: 'entry_price_real', type: 'REAL' },
+    { table: 'signals', column: 'exit_price_real', type: 'REAL' },
+    { table: 'signals', column: 'profit_real', type: 'REAL' },
+    { table: 'signals', column: 'atr_value', type: 'REAL' },
   ];
 
   for (const { table, column, type } of columnsToAdd) {
@@ -222,6 +227,37 @@ function updateSignalProfitCalculated(signalId, profitCalculated) {
   db.prepare(`
     UPDATE signals SET profit_calculated = @profitCalculated WHERE id = @signalId
   `).run({ profitCalculated, signalId });
+}
+
+/**
+ * Met a jour les prix reels Binance d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {Object} data - { entryPriceReal, exitPriceReal, profitReal, atrValue }
+ */
+function updateSignalBinancePrices(signalId, data) {
+  const fields = [];
+  const params = { signalId };
+
+  if (data.entryPriceReal !== undefined) {
+    fields.push('entry_price_real = @entryPriceReal');
+    params.entryPriceReal = data.entryPriceReal;
+  }
+  if (data.exitPriceReal !== undefined) {
+    fields.push('exit_price_real = @exitPriceReal');
+    params.exitPriceReal = data.exitPriceReal;
+  }
+  if (data.profitReal !== undefined) {
+    fields.push('profit_real = @profitReal');
+    params.profitReal = data.profitReal;
+  }
+  if (data.atrValue !== undefined) {
+    fields.push('atr_value = @atrValue');
+    params.atrValue = data.atrValue;
+  }
+
+  if (fields.length > 0) {
+    db.prepare(`UPDATE signals SET ${fields.join(', ')} WHERE id = @signalId`).run(params);
+  }
 }
 
 // ============================================================
@@ -642,6 +678,7 @@ module.exports = {
   getClosedSignalsSince,
   countSignals,
   updateSignalPortfolio,
+  updateSignalBinancePrices,
   resetPortfolioData,
   recalculateAllPrices,
   getGroups,

@@ -72,6 +72,12 @@ module.exports = {
     portfolioTime: process.env.PORTFOLIO_REPORT_TIME || '21:59',
   },
 
+  // Binance API (lecture seule)
+  binance: {
+    apiKey: process.env.BINANCE_API_KEY || '',
+    apiSecret: process.env.BINANCE_API_SECRET || '',
+  },
+
   // Portefeuille virtuel
   portfolio: {
     startCapital: parseFloat(process.env.VIRTUAL_PORTFOLIO_START || '200'),
