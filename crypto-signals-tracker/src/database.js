@@ -177,6 +177,10 @@ function runMigrations() {
     { table: 'signals', column: 'position_size', type: 'REAL' },
     { table: 'signals', column: 'trading_fees_total', type: 'REAL' },
     { table: 'signals', column: 'net_profit_loss', type: 'REAL' },
+    // Colonnes pour le calcul de profit depuis les prix (pas depuis Telegram)
+    { table: 'signals', column: 'entry_price_used', type: 'REAL' },
+    { table: 'signals', column: 'exit_price', type: 'REAL' },
+    { table: 'signals', column: 'profit_calculated', type: 'REAL' },
   ];
 
   for (const { table, column, type } of columnsToAdd) {
@@ -190,6 +194,49 @@ function runMigrations() {
       }
     }
   }
+}
+
+// ============================================================
+// CALCUL DE PROFIT DEPUIS LES PRIX
+// ============================================================
+
+/**
+ * Calcule le profit % a partir des prix d'entree et de sortie.
+ * Formule LONG  : ((exitPrice - entryPrice) / entryPrice) * 100 * leverage
+ * Formule SHORT : ((entryPrice - exitPrice) / entryPrice) * 100 * leverage
+ *
+ * @param {number} entryPrice - Prix d'entree (midpoint de la zone)
+ * @param {number} exitPrice - Prix de sortie (target ou stop loss)
+ * @param {string} direction - 'LONG' ou 'SHORT'
+ * @param {number} leverage - Effet de levier
+ * @returns {number} Profit en % (positif = gain, negatif = perte)
+ */
+function computeProfitFromPrices(entryPrice, exitPrice, direction, leverage) {
+  if (!entryPrice || entryPrice === 0) return 0;
+  let spotProfit;
+  if (direction === 'SHORT') {
+    spotProfit = ((entryPrice - exitPrice) / entryPrice) * 100;
+  } else {
+    spotProfit = ((exitPrice - entryPrice) / entryPrice) * 100;
+  }
+  return spotProfit * (leverage || 1);
+}
+
+/**
+ * Met a jour les colonnes de prix calcules d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {number} entryPriceUsed - Prix d'entree utilise (midpoint)
+ * @param {number} exitPrice - Prix de sortie
+ * @param {number} profitCalculated - Profit calcule en %
+ */
+function updateSignalPrices(signalId, entryPriceUsed, exitPrice, profitCalculated) {
+  db.prepare(`
+    UPDATE signals
+    SET entry_price_used = @entryPriceUsed,
+        exit_price = @exitPrice,
+        profit_calculated = @profitCalculated
+    WHERE id = @signalId
+  `).run({ entryPriceUsed, exitPrice, profitCalculated, signalId });
 }
 
 // ============================================================
@@ -222,13 +269,16 @@ function insertSignal(signal) {
     return null;
   }
 
+  // Calculer le prix d'entree utilise = milieu de la zone d'entree (approche conservatrice)
+  const entryPriceUsed = (signal.entryPriceMin + signal.entryPriceMax) / 2;
+
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO signals
       (telegram_message_id, pair, direction, entry_price_min, entry_price_max,
-       leverage, stop_loss, emitter, targets, status, source_group_name)
+       leverage, stop_loss, emitter, targets, status, source_group_name, entry_price_used)
     VALUES
       (@telegramMessageId, @pair, @direction, @entryPriceMin, @entryPriceMax,
-       @leverage, @stopLoss, @emitter, @targets, 'open', @sourceGroupName)
+       @leverage, @stopLoss, @emitter, @targets, 'open', @sourceGroupName, @entryPriceUsed)
   `);
 
   const result = stmt.run({
@@ -242,6 +292,7 @@ function insertSignal(signal) {
     emitter: signal.emitter || null,
     targets: JSON.stringify(signal.targets),
     sourceGroupName: signal.sourceGroup || null,
+    entryPriceUsed,
   });
 
   if (result.changes > 0) {
@@ -303,7 +354,22 @@ function insertConfirmation(confirmation) {
         profitPct: confirmation.profitPct,
         signalId,
       });
-      logger.info(`Signal ${signalId} mis à jour : target ${confirmation.targetNumber} atteint (${confirmation.profitPct}%)`);
+
+      // Calculer le profit depuis les prix (pas depuis Telegram)
+      const fullSignal = db.prepare('SELECT * FROM signals WHERE id = ?').get(signalId);
+      if (fullSignal) {
+        const entryMid = fullSignal.entry_price_used || (fullSignal.entry_price_min + fullSignal.entry_price_max) / 2;
+        const targets = JSON.parse(fullSignal.targets);
+        const targetIdx = confirmation.targetNumber - 1;
+        const exitPrice = targets[targetIdx] !== undefined ? targets[targetIdx] : targets[targets.length - 1];
+
+        const profitCalc = computeProfitFromPrices(entryMid, exitPrice, fullSignal.direction, fullSignal.leverage);
+        updateSignalPrices(signalId, entryMid, exitPrice, Math.round(profitCalc * 100) / 100);
+
+        logger.info(`Signal ${signalId} : profit calcule depuis prix = ${profitCalc.toFixed(2)}% (entry=${entryMid}, exit=${exitPrice}, ${fullSignal.direction} X${fullSignal.leverage})`);
+      }
+
+      logger.info(`Signal ${signalId} mis à jour : target ${confirmation.targetNumber} atteint (Telegram: ${confirmation.profitPct}%)`);
     }
 
     logger.info(`Confirmation insérée : ${confirmation.pair} TP${confirmation.targetNumber} +${confirmation.profitPct}%`);
@@ -379,6 +445,19 @@ function insertStopLoss(slData) {
           updated_at = CURRENT_TIMESTAMP
       WHERE id = @id
     `).run({ lossPct: slData.lossPct ? -Math.abs(slData.lossPct) : null, id: signalId });
+
+    // Calculer la perte depuis les prix (pas depuis Telegram)
+    const fullSignal = db.prepare('SELECT * FROM signals WHERE id = ?').get(signalId);
+    if (fullSignal && fullSignal.stop_loss > 0) {
+      const entryMid = fullSignal.entry_price_used || (fullSignal.entry_price_min + fullSignal.entry_price_max) / 2;
+      const exitPrice = fullSignal.stop_loss;
+
+      const profitCalc = computeProfitFromPrices(entryMid, exitPrice, fullSignal.direction, fullSignal.leverage);
+      updateSignalPrices(signalId, entryMid, exitPrice, Math.round(profitCalc * 100) / 100);
+
+      logger.info(`Signal ${signalId} : perte calculee depuis prix = ${profitCalc.toFixed(2)}% (entry=${entryMid}, SL=${exitPrice}, ${fullSignal.direction} X${fullSignal.leverage})`);
+    }
+
     logger.info(`Stop loss enregistré pour signal ${signalId} : ${slData.pair}`);
   }
 }
@@ -433,9 +512,56 @@ function resetPortfolioData() {
         virtual_portfolio_after = NULL,
         position_size = NULL,
         trading_fees_total = NULL,
-        net_profit_loss = NULL
+        net_profit_loss = NULL,
+        exit_price = NULL,
+        profit_calculated = NULL
   `).run();
-  logger.info('Données de portefeuille réinitialisées');
+  logger.info('Données de portefeuille et prix réinitialisées');
+}
+
+/**
+ * Recalcule entry_price_used, exit_price et profit_calculated
+ * pour tous les signaux termines (TP ou SL).
+ * Utilise exclusivement les prix stockes en BDD.
+ */
+function recalculateAllPrices() {
+  // D'abord, remplir entry_price_used pour les anciens signaux qui n'en ont pas
+  db.prepare(`
+    UPDATE signals
+    SET entry_price_used = (entry_price_min + entry_price_max) / 2.0
+    WHERE entry_price_used IS NULL
+  `).run();
+
+  // Recalculer pour les TP
+  const tpSignals = db.prepare(`
+    SELECT * FROM signals WHERE status IN ('tp_hit', 'all_tp_hit')
+  `).all();
+
+  for (const signal of tpSignals) {
+    const entryMid = signal.entry_price_used || (signal.entry_price_min + signal.entry_price_max) / 2;
+    const targets = JSON.parse(signal.targets);
+    const targetIdx = (signal.last_target_hit || 1) - 1;
+    const exitPrice = targets[targetIdx] !== undefined ? targets[targetIdx] : targets[targets.length - 1];
+
+    const profitCalc = computeProfitFromPrices(entryMid, exitPrice, signal.direction, signal.leverage);
+    updateSignalPrices(signal.id, entryMid, exitPrice, Math.round(profitCalc * 100) / 100);
+  }
+
+  // Recalculer pour les SL
+  const slSignals = db.prepare(`
+    SELECT * FROM signals WHERE status = 'sl_hit'
+  `).all();
+
+  for (const signal of slSignals) {
+    const entryMid = signal.entry_price_used || (signal.entry_price_min + signal.entry_price_max) / 2;
+    if (signal.stop_loss > 0) {
+      const exitPrice = signal.stop_loss;
+      const profitCalc = computeProfitFromPrices(entryMid, exitPrice, signal.direction, signal.leverage);
+      updateSignalPrices(signal.id, entryMid, exitPrice, Math.round(profitCalc * 100) / 100);
+    }
+  }
+
+  logger.info(`Prix recalculés : ${tpSignals.length} TP + ${slSignals.length} SL`);
 }
 
 // ============================================================
@@ -574,6 +700,8 @@ module.exports = {
   countSignals,
   updateSignalPortfolio,
   resetPortfolioData,
+  recalculateAllPrices,
+  computeProfitFromPrices,
   getGroups,
   close,
 };

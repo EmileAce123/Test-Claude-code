@@ -19,12 +19,16 @@ database.init(config.database.path);
 // Configurer le simulateur
 portfolio.configure(config.portfolio);
 
-// ETAPE 1 : Effacer toutes les anciennes valeurs de portefeuille
-console.log('[1/2] Reset des colonnes portfolio (efface les anciennes valeurs)...');
+// ETAPE 1 : Effacer toutes les anciennes valeurs de portefeuille et prix calcules
+console.log('[1/3] Reset des colonnes portfolio et prix calcules...');
 database.resetPortfolioData();
 
-// ETAPE 2 : Recalculer tout depuis zero
-console.log('[2/2] Recalcul complet (profit % = leverage deja inclus)...\n');
+// ETAPE 2 : Recalculer les prix (entry midpoint, exit price, profit calcule)
+console.log('[2/3] Recalcul des prix depuis les donnees brutes...');
+database.recalculateAllPrices();
+
+// ETAPE 3 : Recalculer le portefeuille virtuel depuis zero
+console.log('[3/3] Recalcul complet du portefeuille (profit calcule depuis les prix)...\n');
 const result = portfolio.recalculateAll();
 
 console.log('\n--- Resultat ---');
