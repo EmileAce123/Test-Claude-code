@@ -37,7 +37,7 @@ function calculateGlobalStats() {
   }
 
   // Séparer les trades gagnants et perdants
-  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit', 'closed', 'partial'].includes(s.status));
+  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit', 'closed', 'partial', 'manual_close'].includes(s.status));
   const losses = closedSignals.filter(s => ['sl_hit', 'stopped'].includes(s.status));
 
   // ---- Win Rate ----
@@ -114,7 +114,7 @@ function calculateStatsSince(since) {
     };
   }
 
-  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit', 'closed', 'partial'].includes(s.status));
+  const wins = closedSignals.filter(s => ['tp_hit', 'all_tp_hit', 'closed', 'partial', 'manual_close'].includes(s.status));
   const losses = closedSignals.filter(s => ['sl_hit', 'stopped'].includes(s.status));
   const totalTrades = wins.length + losses.length;
   const winRate = totalTrades > 0 ? (wins.length / totalTrades) * 100 : 0;

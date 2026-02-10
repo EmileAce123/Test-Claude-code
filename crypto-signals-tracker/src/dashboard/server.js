@@ -20,6 +20,8 @@ dotenv.config({ path: path.join(__dirname, '..', '..', 'config', '.env') });
 
 const database = require('../database');
 const portfolio = require('../portfolio-simulator');
+const binanceClient = require('../binance-client');
+const priceUpdater = require('../price-updater');
 const logger = require('../logger');
 const auth = require('./auth');
 const apiRoutes = require('./routes');
@@ -49,6 +51,21 @@ portfolio.configure({
   tradingFeePct: parseFloat(process.env.TRADING_FEE_PERCENT || '0.5'),
 });
 logger.info('Dashboard : portefeuille virtuel configure');
+
+// ---- Initialiser le client Binance (pour prix temps reel + fermeture manuelle) ----
+binanceClient.init();
+if (binanceClient.isReady()) {
+  binanceClient.testConnection().then(ok => {
+    if (ok) {
+      logger.info('Dashboard : Binance connecte - prix temps reel actifs');
+      priceUpdater.start();
+    } else {
+      logger.warn('Dashboard : Binance connexion echouee - prix temps reel inactifs');
+    }
+  });
+} else {
+  logger.warn('Dashboard : Binance non configure (cles API manquantes) - prix temps reel inactifs');
+}
 
 // ---- Créer le serveur Express ----
 const app = express();
@@ -115,10 +132,12 @@ app.listen(PORT, () => {
 
 // Gestion de l'arrêt propre
 process.on('SIGINT', () => {
+  priceUpdater.stop();
   database.close();
   process.exit(0);
 });
 process.on('SIGTERM', () => {
+  priceUpdater.stop();
   database.close();
   process.exit(0);
 });

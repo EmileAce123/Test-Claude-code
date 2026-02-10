@@ -203,6 +203,11 @@ function runMigrations() {
     { table: 'signals', column: 'exit_price_real', type: 'REAL' },
     { table: 'signals', column: 'profit_real', type: 'REAL' },
     { table: 'signals', column: 'atr_value', type: 'REAL' },
+    // Colonnes pour prix temps reel
+    { table: 'signals', column: 'current_price', type: 'REAL' },
+    { table: 'signals', column: 'last_price_update', type: 'DATETIME' },
+    // Colonnes pour type d'execution
+    { table: 'trade_executions', column: 'execution_type', type: "TEXT DEFAULT 'auto'" },
     // Colonnes pour la strategie pyramidale multi-TP
     { table: 'signals', column: 'position_size_initial', type: 'REAL' },
     { table: 'signals', column: 'position_remaining_percent', type: 'REAL DEFAULT 100' },
@@ -306,9 +311,9 @@ function insertTradeExecution(data) {
   return db.prepare(`
     INSERT INTO trade_executions
       (signal_id, target_number, target_price, position_closed_percent,
-       position_closed_size, profit_realized, profit_realized_percent)
+       position_closed_size, profit_realized, profit_realized_percent, execution_type)
     VALUES (@signalId, @targetNumber, @targetPrice, @positionClosedPercent,
-            @positionClosedSize, @profitRealized, @profitRealizedPercent)
+            @positionClosedSize, @profitRealized, @profitRealizedPercent, @executionType)
   `).run({
     signalId: data.signalId,
     targetNumber: data.targetNumber,
@@ -317,6 +322,7 @@ function insertTradeExecution(data) {
     positionClosedSize: data.positionClosedSize,
     profitRealized: data.profitRealized,
     profitRealizedPercent: data.profitRealizedPercent,
+    executionType: data.executionType || 'auto',
   });
 }
 
@@ -364,7 +370,7 @@ function updateSignalPyramidState(signalId, data) {
  */
 function getActivePositions() {
   return db.prepare(
-    "SELECT * FROM signals WHERE status = 'partial' ORDER BY created_at DESC"
+    "SELECT * FROM signals WHERE status IN ('open', 'partial') AND position_size_initial > 0 ORDER BY created_at DESC"
   ).all();
 }
 
@@ -406,6 +412,37 @@ function getStopLosses(signalId) {
   return db.prepare(
     'SELECT * FROM stop_losses WHERE signal_id = ? ORDER BY created_at ASC'
   ).all(signalId);
+}
+
+/**
+ * Recupere tous les trades ouverts (open ou partial) pour mise a jour des prix.
+ * @returns {Array} Signaux avec position ouverte
+ */
+function getOpenTrades() {
+  return db.prepare(
+    "SELECT * FROM signals WHERE status IN ('open', 'partial') AND position_size_initial > 0 ORDER BY created_at DESC"
+  ).all();
+}
+
+/**
+ * Met a jour le prix actuel et le P&L latent d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {Object} data - { currentPrice, profitLatent, pnlTotal }
+ */
+function updateSignalCurrentPrice(signalId, data) {
+  db.prepare(`
+    UPDATE signals SET
+      current_price = @currentPrice,
+      profit_latent = @profitLatent,
+      pnl_total = @pnlTotal,
+      last_price_update = CURRENT_TIMESTAMP
+    WHERE id = @signalId
+  `).run({
+    signalId,
+    currentPrice: data.currentPrice,
+    profitLatent: data.profitLatent,
+    pnlTotal: data.pnlTotal,
+  });
 }
 
 // ============================================================
@@ -665,7 +702,7 @@ function resetPortfolioData() {
   // Remettre les signaux non-annules en statut 'open' pour recalcul
   db.prepare(`
     UPDATE signals SET status = 'open'
-    WHERE status IN ('partial', 'closed', 'stopped', 'tp_hit', 'all_tp_hit', 'sl_hit')
+    WHERE status IN ('partial', 'closed', 'stopped', 'manual_close', 'tp_hit', 'all_tp_hit', 'sl_hit')
   `).run();
 
   // Supprimer toutes les executions pyramidales
@@ -740,7 +777,7 @@ function getConfirmations(signalId) {
 function getClosedSignals() {
   return db.prepare(`
     SELECT * FROM signals
-    WHERE status IN ('closed', 'stopped', 'partial', 'tp_hit', 'all_tp_hit', 'sl_hit')
+    WHERE status IN ('closed', 'stopped', 'partial', 'manual_close', 'tp_hit', 'all_tp_hit', 'sl_hit')
     ORDER BY created_at DESC
   `).all();
 }
@@ -753,7 +790,7 @@ function getClosedSignals() {
 function getClosedSignalsSince(since) {
   return db.prepare(`
     SELECT * FROM signals
-    WHERE status IN ('closed', 'stopped', 'partial', 'tp_hit', 'all_tp_hit', 'sl_hit')
+    WHERE status IN ('closed', 'stopped', 'partial', 'manual_close', 'tp_hit', 'all_tp_hit', 'sl_hit')
       AND created_at >= ?
     ORDER BY created_at DESC
   `).all(since);
@@ -823,4 +860,6 @@ module.exports = {
   getAllSignalsChronological,
   deleteAllTradeExecutions,
   getStopLosses,
+  getOpenTrades,
+  updateSignalCurrentPrice,
 };

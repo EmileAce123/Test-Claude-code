@@ -8,6 +8,7 @@ let currentSort = { column: 'created_at', direction: 'desc' };
 let allTrades = [];
 let charts = {};
 let refreshInterval = null;
+let closeModalTradeId = null;
 
 // ---- Initialisation ----
 document.addEventListener('DOMContentLoaded', () => {
@@ -30,6 +31,7 @@ async function refreshAll() {
       loadPortfolio(),
       loadActivePositions(),
       checkHealth(),
+      updateRealtimeIndicator(),
     ]);
     document.getElementById('lastRefresh').textContent =
       'Maj : ' + new Date().toLocaleTimeString('fr-FR');
@@ -233,8 +235,11 @@ async function loadPortfolio() {
     const exposureEl = document.getElementById('portfolioExposure');
     const exposure = data.exposure || 0;
     exposureEl.textContent = exposure.toFixed(2) + '$';
+    const latentTotal = data.latentTotal || 0;
+    const capitalWithLatent = data.current + latentTotal;
     document.getElementById('portfolioExposureSub').textContent =
-      'Dispo : ' + (data.current - exposure).toFixed(2) + '$';
+      'Dispo : ' + (data.current - exposure).toFixed(2) + '$' +
+      (latentTotal !== 0 ? ' | Latent : ' + (latentTotal >= 0 ? '+' : '') + latentTotal.toFixed(2) + '$' : '');
 
     renderPortfolioChart(data.history);
   } catch (err) {
@@ -268,12 +273,28 @@ async function loadActivePositions() {
       const latent = pos.profit_latent || 0;
       const pnl = pos.pnl_total || 0;
       const remaining = pos.position_remaining_size || 0;
+      const currentPrice = pos.current_price;
+      const lastUpdate = pos.last_price_update ? timeAgo(pos.last_price_update) : '--';
+
+      let priceInfo = '';
+      if (currentPrice) {
+        const entryPrice = pos.entry_price_real;
+        let pctChange = '';
+        if (entryPrice) {
+          const change = pos.direction === 'LONG'
+            ? ((currentPrice - entryPrice) / entryPrice * 100)
+            : ((entryPrice - currentPrice) / entryPrice * 100);
+          pctChange = ' (' + (change >= 0 ? '+' : '') + change.toFixed(2) + '%)';
+        }
+        priceInfo = '$' + formatPrice(currentPrice) + pctChange + ' - ' + lastUpdate;
+      }
 
       return '<div class="active-position-card">' +
         '<div class="ap-header">' +
           '<strong>' + pos.pair + '</strong> ' +
           '<span class="direction-' + pos.direction.toLowerCase() + '">' + pos.direction + '</span> ' +
           'X' + pos.leverage +
+          (priceInfo ? '<span class="ap-price">' + priceInfo + '</span>' : '') +
         '</div>' +
         '<div class="ap-body">' +
           '<div class="ap-row"><span>Position restante</span><span>' + (pos.position_remaining_percent || 0).toFixed(1) + '% (' + remaining.toFixed(2) + '$)</span></div>' +
@@ -281,6 +302,12 @@ async function loadActivePositions() {
           '<div class="ap-row"><span>Profit realise</span><span class="' + (realized >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (realized >= 0 ? '+' : '') + realized.toFixed(2) + '$</span></div>' +
           '<div class="ap-row"><span>P&L latent</span><span class="' + (latent >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (latent >= 0 ? '+' : '') + latent.toFixed(2) + '$</span></div>' +
           '<div class="ap-row ap-total"><span>P&L total</span><span class="' + (pnl >= 0 ? 'profit-positive' : 'profit-negative') + '">' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '$</span></div>' +
+        '</div>' +
+        '<div class="ap-actions">' +
+          '<button class="btn btn-close-full" onclick="closeTrade(' + pos.id + ', 100)">Fermer 100%</button>' +
+          '<button class="btn btn-close-partial" onclick="closeTrade(' + pos.id + ', 50)">Fermer 50%</button>' +
+          '<button class="btn btn-close-custom" onclick="showCloseModal(' + pos.id + ')">Fermer %...</button>' +
+          '<button class="btn btn-detail" onclick="showTradeDetail(' + pos.id + ')">Details</button>' +
         '</div>' +
       '</div>';
     }).join('');
@@ -314,23 +341,35 @@ async function showTradeDetail(tradeId) {
     let html = '<div class="modal-info">';
     html += '<div class="mi-row"><span>Position initiale</span><span>' + (sig.position_size_initial || 0).toFixed(2) + '$</span></div>';
     html += '<div class="mi-row"><span>Entree</span><span>$' + sig.entry_price_min + ' - $' + sig.entry_price_max + '</span></div>';
+    if (sig.entry_price_real) {
+      html += '<div class="mi-row"><span>Entree reelle</span><span>$' + formatPrice(sig.entry_price_real) + '</span></div>';
+    }
+    if (sig.current_price) {
+      html += '<div class="mi-row"><span>Prix actuel</span><span>$' + formatPrice(sig.current_price) + (sig.last_price_update ? ' (' + timeAgo(sig.last_price_update) + ')' : '') + '</span></div>';
+    }
     html += '<div class="mi-row"><span>Stop Loss</span><span>$' + sig.stop_loss + '</span></div>';
     html += '<div class="mi-row"><span>Statut</span><span>' + statusBadge(sig.status) + '</span></div>';
     html += '</div>';
 
     if (execs.length > 0) {
       html += '<h4 style="margin:16px 0 8px;color:var(--accent-blue);">Executions</h4>';
-      html += '<table class="modal-table"><thead><tr><th>TP</th><th>% Ferme</th><th>Taille</th><th>Profit %</th><th>Profit $</th></tr></thead><tbody>';
+      html += '<table class="modal-table"><thead><tr><th>TP</th><th>Type</th><th>% Ferme</th><th>Taille</th><th>Profit %</th><th>Profit $</th></tr></thead><tbody>';
 
       let totalRealized = 0;
       for (const ex of execs) {
         const isSL = ex.target_number === 0;
-        const label = isSL ? 'SL' : 'TP' + ex.target_number;
+        const isManual = ex.target_number === 999;
+        const label = isSL ? 'SL' : isManual ? 'MANUAL' : 'TP' + ex.target_number;
+        const execType = ex.execution_type || 'auto';
+        const typeBadge = execType === 'manual' ? '<span class="badge badge-manual">Manuel</span>'
+          : execType === 'stop_loss' ? '<span class="badge badge-lost">SL</span>'
+          : '<span class="badge badge-open">Auto</span>';
         const profitClass = ex.profit_realized >= 0 ? 'profit-positive' : 'profit-negative';
         totalRealized += ex.profit_realized || 0;
 
         html += '<tr>';
         html += '<td><strong>' + label + '</strong></td>';
+        html += '<td>' + typeBadge + '</td>';
         html += '<td>' + (ex.position_closed_percent || 0).toFixed(1) + '%</td>';
         html += '<td>' + (ex.position_closed_size || 0).toFixed(2) + '$</td>';
         html += '<td class="' + profitClass + '">' + (ex.profit_realized_percent || 0).toFixed(2) + '%</td>';
@@ -352,6 +391,15 @@ async function showTradeDetail(tradeId) {
       html += '</div>';
     } else {
       html += '<p style="color:var(--text-muted);margin-top:16px;">Aucune execution enregistree.</p>';
+    }
+
+    // Bouton fermeture manuelle si position ouverte
+    if (['open', 'partial'].includes(sig.status) && sig.position_size_initial > 0) {
+      html += '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">';
+      html += '<button class="btn btn-close-full" onclick="closeModal();closeTrade(' + sig.id + ', 100)">Fermer 100%</button>';
+      html += '<button class="btn btn-close-partial" onclick="closeModal();closeTrade(' + sig.id + ', 50)">Fermer 50%</button>';
+      html += '<button class="btn btn-close-custom" onclick="closeModal();showCloseModal(' + sig.id + ')">Fermer %...</button>';
+      html += '</div>';
     }
 
     body.innerHTML = html;
@@ -547,7 +595,7 @@ function renderTrades(trades) {
   const tbody = document.getElementById('tradesBody');
 
   if (!trades || trades.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="13" style="text-align:center;color:#656d76;padding:40px;">Aucun trade pour ces filtres.</td></tr>';
     return;
   }
 
@@ -556,6 +604,15 @@ function renderTrades(trades) {
     const posText = posInitial ? posInitial.toFixed(2) + '$' : '--';
 
     const closedPct = posInitial ? (100 - (trade.position_remaining_percent || 100)).toFixed(1) + '%' : '--';
+
+    // Prix actuel
+    let priceText = '--';
+    if (trade.current_price) {
+      priceText = '$' + formatPrice(trade.current_price);
+      if (trade.last_price_update) {
+        priceText += '<br><span class="price-age">' + timeAgo(trade.last_price_update) + '</span>';
+      }
+    }
 
     const realized = trade.profit_realized_total;
     const realizedText = realized != null ? ((realized >= 0 ? '+' : '') + realized.toFixed(2) + '$') : '--';
@@ -573,6 +630,20 @@ function renderTrades(trades) {
       ? trade.source_group_name.replace('CryptoMau ', '').replace(' Trading Signals', '').replace(' Signals', '')
       : '--';
 
+    // Actions : boutons de fermeture si position ouverte
+    let actionsHtml = '';
+    if (trade.id && ['open', 'partial'].includes(trade.status) && posInitial > 0) {
+      actionsHtml =
+        '<div class="trade-actions-compact">' +
+          '<button class="btn btn-detail" onclick="showTradeDetail(' + trade.id + ')">Details</button>' +
+          '<button class="btn btn-close-sm" onclick="showCloseModal(' + trade.id + ')">Fermer</button>' +
+        '</div>';
+    } else if (trade.id) {
+      actionsHtml = '<button class="btn btn-detail" onclick="showTradeDetail(' + trade.id + ')">Details</button>';
+    } else {
+      actionsHtml = '--';
+    }
+
     return '<tr>' +
       '<td>' + formatDate(trade.created_at) + '</td>' +
       '<td><strong>' + trade.pair + '</strong></td>' +
@@ -580,12 +651,13 @@ function renderTrades(trades) {
       '<td>X' + trade.leverage + '</td>' +
       '<td>' + posText + '</td>' +
       '<td>' + closedPct + '</td>' +
+      '<td>' + priceText + '</td>' +
       '<td class="' + realizedClass + '">' + realizedText + '</td>' +
       '<td class="' + latentClass + '">' + latentText + '</td>' +
       '<td class="' + pnlClass + '">' + pnlText + '</td>' +
       '<td><span class="badge badge-source">' + source + '</span></td>' +
       '<td>' + statusBadge(trade.status) + '</td>' +
-      '<td>' + (trade.id ? '<button class="btn btn-detail" onclick="showTradeDetail(' + trade.id + ')">Voir</button>' : '--') + '</td>' +
+      '<td>' + actionsHtml + '</td>' +
       '</tr>';
   }).join('');
 }
@@ -649,6 +721,7 @@ function statusBadge(status) {
     'partial':    { label: 'Partiel',     css: 'badge-partial' },
     'closed':     { label: 'Ferme',       css: 'badge-won' },
     'stopped':    { label: 'Stoppe',      css: 'badge-lost' },
+    'manual_close': { label: 'Ferme manuellement', css: 'badge-manual' },
     'tp_hit':     { label: 'TP Hit',      css: 'badge-won' },
     'all_tp_hit': { label: 'All TP',      css: 'badge-won' },
     'sl_hit':     { label: 'SL Hit',      css: 'badge-lost' },
@@ -656,6 +729,136 @@ function statusBadge(status) {
   };
   const s = map[status] || { label: status, css: '' };
   return '<span class="badge ' + s.css + '">' + s.label + '</span>';
+}
+
+// ============================================================
+// FERMETURE MANUELLE
+// ============================================================
+
+async function closeTrade(tradeId, percent) {
+  if (!confirm('Fermer ' + percent + '% de la position ?')) return;
+
+  try {
+    const response = await fetch('/api/trades/' + tradeId + '/close', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ percent }),
+    });
+
+    if (response.status === 401) return window.location.href = '/login';
+    const result = await response.json();
+
+    if (result.success) {
+      const sign = result.profit >= 0 ? '+' : '';
+      alert('Position fermee ! Profit: ' + sign + result.profit.toFixed(2) + '$\nRestant: ' + result.remaining + '%');
+      refreshAll();
+    } else {
+      alert('Erreur: ' + (result.error || 'Erreur inconnue'));
+    }
+  } catch (error) {
+    alert('Erreur reseau: ' + error.message);
+  }
+}
+
+function showCloseModal(tradeId) {
+  closeModalTradeId = tradeId;
+  const trade = allTrades.find(t => t.id === tradeId);
+
+  const modal = document.getElementById('closeModal');
+  const pairEl = document.getElementById('closeModalPair');
+  const remainingEl = document.getElementById('closeModalRemaining');
+  const priceEl = document.getElementById('closeModalPrice');
+  const slider = document.getElementById('closePercent');
+  const btn = document.getElementById('confirmCloseBtn');
+
+  if (trade) {
+    pairEl.textContent = trade.pair + ' ' + trade.direction + ' X' + trade.leverage;
+    remainingEl.textContent = (trade.position_remaining_percent || 100).toFixed(1) + '% (' + (trade.position_remaining_size || 0).toFixed(2) + '$)';
+    priceEl.textContent = trade.current_price ? '$' + formatPrice(trade.current_price) : 'N/A';
+  } else {
+    pairEl.textContent = 'Trade #' + tradeId;
+    remainingEl.textContent = '--';
+    priceEl.textContent = '--';
+  }
+
+  slider.value = 100;
+  document.getElementById('closePercentVal').textContent = '100%';
+  btn.onclick = () => confirmManualClose();
+  modal.classList.add('visible');
+}
+
+function setClosePercent(pct) {
+  const slider = document.getElementById('closePercent');
+  slider.value = pct;
+  document.getElementById('closePercentVal').textContent = pct + '%';
+}
+
+async function confirmManualClose() {
+  if (!closeModalTradeId) return;
+  const percent = parseInt(document.getElementById('closePercent').value, 10);
+  document.getElementById('closeModal').classList.remove('visible');
+  await closeTrade(closeModalTradeId, percent);
+  closeModalTradeId = null;
+}
+
+function closeCloseModal(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('closeModal').classList.remove('visible');
+  closeModalTradeId = null;
+}
+
+// ============================================================
+// INDICATEUR TEMPS REEL
+// ============================================================
+
+async function updateRealtimeIndicator() {
+  try {
+    const response = await fetch('/api/prices/current');
+    if (response.status === 401) return;
+    const data = await response.json();
+
+    const dot = document.getElementById('rtDot');
+    const text = document.getElementById('rtText');
+
+    if (data.priceUpdaterActive && data.count > 0) {
+      dot.className = 'rt-dot active';
+      text.textContent = 'LIVE | ' + data.count + ' position(s)';
+    } else if (data.priceUpdaterActive) {
+      dot.className = 'rt-dot active';
+      text.textContent = 'LIVE | Aucune position';
+    } else {
+      dot.className = 'rt-dot';
+      text.textContent = 'Prix hors-ligne';
+    }
+  } catch (err) {
+    document.getElementById('rtDot').className = 'rt-dot';
+    document.getElementById('rtText').textContent = '--';
+  }
+}
+
+// ============================================================
+// UTILITAIRES SUPPLEMENTAIRES
+// ============================================================
+
+function formatPrice(price) {
+  if (price == null) return '--';
+  if (price < 0.01) return price.toFixed(6);
+  if (price < 1) return price.toFixed(4);
+  if (price < 100) return price.toFixed(3);
+  return price.toFixed(2);
+}
+
+function timeAgo(dateStr) {
+  if (!dateStr) return '--';
+  const now = new Date();
+  const then = new Date(dateStr + (dateStr.includes('Z') || dateStr.includes('+') ? '' : 'Z'));
+  const diffMs = now - then;
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) return diffSec + 's';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return diffMin + 'min';
+  const diffH = Math.floor(diffMin / 60);
+  return diffH + 'h' + (diffMin % 60) + 'min';
 }
 
 async function logout() {

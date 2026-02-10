@@ -1,25 +1,28 @@
 // ============================================================
 // routes.js - Endpoints API du dashboard
 // ============================================================
-// Tous les endpoints sont en LECTURE SEULE.
-// Aucune écriture dans la base de données.
 //
-// GET /api/stats              → Statistiques globales
-// GET /api/trades             → Liste des trades (avec filtres, filtre groupe)
-// GET /api/chart-data         → Données pour les graphiques
-// GET /api/pairs              → Liste des paires disponibles
-// GET /api/groups             → Liste des groupes sources
-// GET /api/export-csv         → Export CSV des trades
-// GET /api/health             → Statut du système
-// GET /api/portfolio          → Etat du portefeuille virtuel
-// GET /api/portfolio-history  → Historique du portefeuille
-// GET /api/portfolio/best-worst → Meilleurs et pires trades en $
+// GET  /api/stats              → Statistiques globales
+// GET  /api/trades             → Liste des trades (avec filtres)
+// GET  /api/trades/active      → Positions ouvertes
+// GET  /api/trades/:id/executions → Executions d'un trade
+// POST /api/trades/:id/close   → Fermeture manuelle
+// GET  /api/chart-data         → Données pour les graphiques
+// GET  /api/pairs              → Liste des paires disponibles
+// GET  /api/groups             → Liste des groupes sources
+// GET  /api/export-csv         → Export CSV des trades
+// GET  /api/health             → Statut du système
+// GET  /api/portfolio          → Etat du portefeuille virtuel
+// GET  /api/portfolio/exposure  → Exposition actuelle
+// GET  /api/prices/current     → Prix actuels des positions
 // ============================================================
 
 const express = require('express');
 const database = require('../database');
 const statsCalculator = require('../stats-calculator');
 const portfolio = require('../portfolio-simulator');
+const binanceClient = require('../binance-client');
+const priceUpdater = require('../price-updater');
 const logger = require('../logger');
 const fs = require('fs');
 const path = require('path');
@@ -425,6 +428,93 @@ router.get('/portfolio/exposure', (req, res) => {
   } catch (err) {
     logger.error(`Erreur API /portfolio/exposure : ${err.message}`);
     res.status(500).json({ error: 'Erreur calcul exposition' });
+  }
+});
+
+// ---- POST /api/trades/:id/close ----
+// Ferme manuellement tout ou partie d'une position
+// Body: { percent: 50 } (optionnel, defaut = tout le restant)
+router.post('/trades/:id/close', async (req, res) => {
+  try {
+    const signalId = parseInt(req.params.id, 10);
+    if (isNaN(signalId)) {
+      return res.status(400).json({ error: 'ID invalide' });
+    }
+
+    const signal = database.getSignalById(signalId);
+    if (!signal) {
+      return res.status(404).json({ error: 'Trade non trouve' });
+    }
+
+    if (!['open', 'partial'].includes(signal.status)) {
+      return res.status(400).json({ error: 'Trade deja ferme (status: ' + signal.status + ')' });
+    }
+
+    if (!signal.position_size_initial || signal.position_size_initial <= 0) {
+      return res.status(400).json({ error: 'Position non initialisee' });
+    }
+
+    const percentToClose = req.body.percent || signal.position_remaining_percent || 100;
+
+    // Recuperer le prix actuel depuis Binance
+    let currentPrice = signal.current_price;
+    if (binanceClient.isReady()) {
+      const symbol = binanceClient.normalizeSymbol(signal.pair);
+      const livePrice = await binanceClient.getCurrentPrice(symbol);
+      if (livePrice) currentPrice = livePrice;
+    }
+
+    if (!currentPrice && !signal.entry_price_real) {
+      return res.status(400).json({ error: 'Prix non disponible (Binance non connecte et pas de prix en cache)' });
+    }
+
+    const result = portfolio.executeManualClose(signalId, percentToClose, currentPrice);
+
+    if (!result) {
+      return res.status(500).json({ error: 'Erreur execution de la fermeture' });
+    }
+
+    logger.info(`[API] Fermeture manuelle signal #${signalId} ${signal.pair} : ${percentToClose}% → profit=${result.profitNet >= 0 ? '+' : ''}${result.profitNet.toFixed(2)}$`);
+
+    res.json({
+      success: true,
+      profit: result.profitNet,
+      profitPct: result.profitPctSafe,
+      remaining: result.remainingPercent,
+      status: result.status,
+      capitalAfter: result.capitalAfter,
+    });
+  } catch (err) {
+    logger.error(`Erreur API POST /trades/:id/close : ${err.message}`);
+    res.status(500).json({ error: 'Erreur fermeture manuelle' });
+  }
+});
+
+// ---- GET /api/prices/current ----
+// Retourne les prix actuels de toutes les positions ouvertes
+router.get('/prices/current', (req, res) => {
+  try {
+    const openTrades = database.getOpenTrades();
+    const prices = openTrades.map(t => ({
+      id: t.id,
+      pair: t.pair,
+      direction: t.direction,
+      leverage: t.leverage,
+      entryPrice: t.entry_price_real,
+      currentPrice: t.current_price,
+      lastPriceUpdate: t.last_price_update,
+      profitLatent: t.profit_latent,
+      pnlTotal: t.pnl_total,
+    }));
+
+    res.json({
+      prices,
+      priceUpdaterActive: priceUpdater.isActive(),
+      count: openTrades.length,
+    });
+  } catch (err) {
+    logger.error(`Erreur API /prices/current : ${err.message}`);
+    res.status(500).json({ error: 'Erreur recuperation des prix' });
   }
 });
 

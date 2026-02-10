@@ -292,6 +292,143 @@ function executePyramidSL(signalId, telegramLossPct) {
 }
 
 // ============================================================
+// FERMETURE MANUELLE
+// ============================================================
+
+/**
+ * Execute une fermeture manuelle (depuis le dashboard).
+ *
+ * @param {number} signalId - ID du signal
+ * @param {number} percentToClose - % de la position INITIALE a fermer
+ * @param {number} currentPrice - Prix actuel depuis Binance
+ * @returns {Object|null} Details de l'execution ou null si erreur
+ */
+function executeManualClose(signalId, percentToClose, currentPrice) {
+  const signal = database.getSignalById(signalId);
+  if (!signal) {
+    logger.warn(`[MANUAL] Signal #${signalId} non trouve`);
+    return null;
+  }
+
+  if (!signal.position_size_initial || signal.position_size_initial <= 0) {
+    logger.warn(`[MANUAL] Signal #${signalId} : position non initialisee`);
+    return null;
+  }
+
+  const remainingPercent = signal.position_remaining_percent || 100;
+  if (remainingPercent <= 0) {
+    logger.info(`[MANUAL] Signal #${signalId} : position deja fermee`);
+    return null;
+  }
+
+  // Limiter au restant disponible
+  const actualPercent = Math.min(percentToClose, remainingPercent);
+  const sizeToClose = signal.position_size_initial * (actualPercent / 100);
+
+  // Calculer profit basé sur le prix reel
+  let profitPctWithLeverage = 0;
+  const entryPrice = signal.entry_price_real;
+  if (entryPrice && currentPrice) {
+    let profitPercent;
+    if (signal.direction === 'LONG') {
+      profitPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+    } else {
+      profitPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
+    }
+    const leverage = signal.leverage || 1;
+    profitPctWithLeverage = profitPercent * leverage;
+  }
+
+  // Appliquer marge de securite
+  const safeProfitPct = profitPctWithLeverage >= 0
+    ? profitPctWithLeverage * SAFETY_MARGIN_GAINS
+    : profitPctWithLeverage * SAFETY_MARGIN_LOSSES;
+
+  // Calculer profit $
+  const feeEntry = calculateFee(sizeToClose);
+  const profitBrut = sizeToClose * (safeProfitPct / 100);
+  const feeExit = calculateFee(sizeToClose + profitBrut);
+  const profitNet = profitBrut - feeEntry - feeExit;
+  const fees = feeEntry + feeExit;
+
+  // Enregistrer l'execution (target_number = 999 pour manual)
+  database.insertTradeExecution({
+    signalId,
+    targetNumber: 999,
+    targetPrice: currentPrice || null,
+    positionClosedPercent: actualPercent,
+    positionClosedSize: sizeToClose,
+    profitRealized: profitNet,
+    profitRealizedPercent: safeProfitPct,
+    executionType: 'manual',
+  });
+
+  // Calculer nouveaux totaux
+  const newRemainingPercent = Math.max(0, remainingPercent - actualPercent);
+  const newRemainingSize = signal.position_size_initial * (newRemainingPercent / 100);
+  const newProfitRealizedTotal = (signal.profit_realized_total || 0) + profitNet;
+
+  // P&L latent sur position restante
+  let profitLatent = 0;
+  if (newRemainingSize > 0 && entryPrice && currentPrice) {
+    let profitPercent;
+    if (signal.direction === 'LONG') {
+      profitPercent = ((currentPrice - entryPrice) / entryPrice) * 100;
+    } else {
+      profitPercent = ((entryPrice - currentPrice) / entryPrice) * 100;
+    }
+    const leverage = signal.leverage || 1;
+    const latentPct = profitPercent * leverage;
+    const safeLatent = latentPct >= 0 ? latentPct * SAFETY_MARGIN_GAINS : latentPct * SAFETY_MARGIN_LOSSES;
+    profitLatent = newRemainingSize * (safeLatent / 100);
+  }
+
+  const pnlTotal = newProfitRealizedTotal + profitLatent;
+  const newStatus = newRemainingPercent <= 0 ? 'manual_close' : 'partial';
+
+  // Mettre a jour le signal
+  database.updateSignalPyramidState(signalId, {
+    positionRemainingPercent: newRemainingPercent,
+    positionRemainingSize: newRemainingSize,
+    profitRealizedTotal: newProfitRealizedTotal,
+    profitLatent,
+    pnlTotal,
+    status: newStatus,
+  });
+
+  // Mettre a jour le capital
+  const capitalBefore = database.getLastPortfolioCapital(config.startCapital);
+  const capitalAfter = profitNet >= 0 ? capitalBefore + profitNet : Math.max(0, capitalBefore + profitNet);
+  database.updateSignalPortfolio(signalId, {
+    virtualPortfolioBefore: capitalBefore,
+    virtualPortfolioAfter: capitalAfter,
+    positionSize: signal.position_size_initial,
+    tradingFeesTotal: fees,
+    netProfitLoss: profitNet,
+  });
+
+  logger.info(`[MANUAL] Signal #${signalId} ${signal.pair} : ferme ${actualPercent}% (${sizeToClose.toFixed(2)}$) @ $${currentPrice} | profit=${profitNet >= 0 ? '+' : ''}${profitNet.toFixed(2)}$ | restant=${newRemainingPercent}% | capital=${capitalAfter.toFixed(2)}$`);
+
+  return {
+    signalId,
+    pair: signal.pair,
+    percentClosed: actualPercent,
+    sizeClosed: sizeToClose,
+    currentPrice,
+    profitPctSafe: safeProfitPct,
+    profitNet,
+    fees,
+    remainingPercent: newRemainingPercent,
+    remainingSize: newRemainingSize,
+    profitRealizedTotal: newProfitRealizedTotal,
+    profitLatent,
+    pnlTotal,
+    status: newStatus,
+    capitalAfter,
+  };
+}
+
+// ============================================================
 // RECALCUL COMPLET
 // ============================================================
 
@@ -620,6 +757,7 @@ module.exports = {
   initPosition,
   executePyramidTP,
   executePyramidSL,
+  executeManualClose,
   recalculateAll,
   getPortfolioSnapshot,
   getBestWorstTrades,

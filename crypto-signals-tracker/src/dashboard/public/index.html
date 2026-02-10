@@ -18,6 +18,10 @@
       </div>
     </div>
     <div class="header-right">
+      <div class="realtime-indicator" id="realtimeIndicator">
+        <span class="rt-dot" id="rtDot"></span>
+        <span id="rtText">--</span>
+      </div>
       <span class="last-refresh" id="lastRefresh"></span>
       <button class="btn" onclick="refreshAll()">Rafraichir</button>
       <a class="btn" href="/api/export-csv">Export CSV</a>
@@ -171,6 +175,7 @@
             <option value="partial">Partiel</option>
             <option value="closed">Ferme</option>
             <option value="stopped">Stoppe</option>
+            <option value="manual_close">Ferme manuellement</option>
             <option value="cancelled">Annule</option>
           </select>
           <select class="filter-select" id="filterPair" onchange="loadTrades()">
@@ -191,12 +196,13 @@
               <th>Leverage</th>
               <th>Position</th>
               <th>% Ferme</th>
+              <th>Prix Actuel</th>
               <th onclick="sortTrades('profit_realized_total')">Realise ($) <span class="sort-arrow">&#9650;</span></th>
               <th>Latent ($)</th>
               <th onclick="sortTrades('pnl_total')">P&L Total <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('source_group_name')">Source <span class="sort-arrow">&#9650;</span></th>
               <th onclick="sortTrades('status')">Statut <span class="sort-arrow">&#9650;</span></th>
-              <th>Details</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody id="tradesBody"></tbody>
@@ -224,6 +230,39 @@
       </div>
       <div class="modal-body" id="modalBody">
         Chargement...
+      </div>
+    </div>
+  </div>
+
+  <!-- ---- Modal Fermeture Manuelle ---- -->
+  <div class="modal-overlay" id="closeModal" onclick="closeCloseModal(event)">
+    <div class="modal-content" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 id="closeModalTitle">Fermer la position</h3>
+        <button class="modal-close" onclick="closeCloseModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-info">
+          <div class="mi-row"><span>Paire</span><span id="closeModalPair">--</span></div>
+          <div class="mi-row"><span>Position restante</span><span id="closeModalRemaining">--</span></div>
+          <div class="mi-row"><span>Prix actuel</span><span id="closeModalPrice">--</span></div>
+        </div>
+        <div style="margin-top:16px;">
+          <label style="font-size:13px;color:var(--text-secondary);">Pourcentage a fermer :</label>
+          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
+            <input type="range" id="closePercent" min="1" max="100" value="100" oninput="document.getElementById('closePercentVal').textContent=this.value+'%'" style="flex:1;">
+            <span id="closePercentVal" style="min-width:45px;text-align:right;font-weight:600;">100%</span>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:12px;">
+            <button class="btn btn-close-pct" onclick="setClosePercent(25)">25%</button>
+            <button class="btn btn-close-pct" onclick="setClosePercent(50)">50%</button>
+            <button class="btn btn-close-pct" onclick="setClosePercent(75)">75%</button>
+            <button class="btn btn-close-pct" onclick="setClosePercent(100)">100%</button>
+          </div>
+        </div>
+        <button class="btn btn-confirm-close" id="confirmCloseBtn" style="margin-top:16px;width:100%;">
+          Confirmer la fermeture
+        </button>
       </div>
     </div>
   </div>

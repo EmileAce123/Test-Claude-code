@@ -170,9 +170,43 @@ console.log(`  pnl_total                  = ${signal.pnl_total}$`);
 console.log(`  status                     = ${signal.status}`);
 
 // ============================================================
-// ETAPE 5 : Inserer un 2eme signal et simuler un SL
+// ETAPE 5 : Fermeture manuelle de 50% du restant
 // ============================================================
-console.log('\n--- ETAPE 5 : 2eme signal BTC/USDT SHORT X20 + SL ---');
+console.log('\n--- ETAPE 5 : Fermeture manuelle (50% de la position restante) ---');
+
+// Simuler un prix d'entree reel pour la fermeture manuelle
+database.updateSignalBinancePrices(insertedSignal.id, { entryPriceReal: 0.03500 });
+const manualClosePrice = 0.04500; // Prix simule
+
+// Le restant est 42.5%, on ferme 21.25% (50% du restant)
+const manualResult = portfolio.executeManualClose(insertedSignal.id, 21.25, manualClosePrice);
+
+if (manualResult) {
+  console.log(`  % ferme        : ${manualResult.percentClosed}%`);
+  console.log(`  Taille fermee  : ${manualResult.sizeClosed.toFixed(2)}$`);
+  console.log(`  Prix fermeture : $${manualResult.currentPrice}`);
+  console.log(`  Profit % (safe): ${manualResult.profitPctSafe >= 0 ? '+' : ''}${manualResult.profitPctSafe.toFixed(2)}%`);
+  console.log(`  Profit net     : ${manualResult.profitNet >= 0 ? '+' : ''}${manualResult.profitNet.toFixed(4)}$`);
+  console.log(`  Restant        : ${manualResult.remainingPercent}% (${manualResult.remainingSize.toFixed(2)}$)`);
+  console.log(`  Status         : ${manualResult.status}`);
+  console.log(`  Capital apres  : ${manualResult.capitalAfter.toFixed(2)}$`);
+} else {
+  console.log('  ERREUR: Fermeture manuelle non executee');
+}
+
+// Verifier les executions incluant la manuelle
+const allExecs = database.getTradeExecutions(insertedSignal.id);
+console.log(`\nExecutions totales : ${allExecs.length}`);
+for (const exec of allExecs) {
+  const label = exec.target_number === 0 ? 'SL' : exec.target_number === 999 ? 'MANUAL' : `TP${exec.target_number}`;
+  const type = exec.execution_type || 'auto';
+  console.log(`  ${label} [${type}] : ferme ${exec.position_closed_percent}% → profit: ${exec.profit_realized >= 0 ? '+' : ''}${exec.profit_realized.toFixed(4)}$`);
+}
+
+// ============================================================
+// ETAPE 6 : Inserer un 2eme signal et simuler un SL
+// ============================================================
+console.log('\n--- ETAPE 6 : 2eme signal BTC/USDT SHORT X20 + SL ---');
 
 const signal2Data = {
   telegramMessageId: 900010,
@@ -215,9 +249,9 @@ if (slResult) {
 }
 
 // ============================================================
-// ETAPE 6 : Recalcul complet
+// ETAPE 7 : Recalcul complet
 // ============================================================
-console.log('--- ETAPE 6 : Recalcul complet du portefeuille ---');
+console.log('--- ETAPE 7 : Recalcul complet du portefeuille ---');
 
 // Reset et recalculer
 database.resetPortfolioData();
