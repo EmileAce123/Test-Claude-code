@@ -198,10 +198,30 @@ function runMigrations() {
 
 /**
  * Insère un nouveau signal de trading dans la base de données.
+ * Vérifie d'abord les doublons : même pair + direction + leverage dans les 5 dernières minutes.
  * @param {Object} signal - Les données du signal parsé
- * @returns {Object} Le signal inséré avec son ID
+ * @returns {Object} Le signal inséré avec son ID, ou null si doublon
  */
 function insertSignal(signal) {
+  // Vérifier les doublons (même pair + direction + leverage dans les 5 dernières minutes)
+  const duplicate = db.prepare(`
+    SELECT id FROM signals
+    WHERE pair = @pair
+      AND direction = @direction
+      AND leverage = @leverage
+      AND datetime(created_at) > datetime('now', '-5 minutes')
+    LIMIT 1
+  `).get({
+    pair: signal.pair,
+    direction: signal.direction,
+    leverage: signal.leverage,
+  });
+
+  if (duplicate) {
+    logger.info(`Signal doublon ignoré : ${signal.pair} ${signal.direction} X${signal.leverage} (signal #${duplicate.id} existe déjà)`);
+    return null;
+  }
+
   const stmt = db.prepare(`
     INSERT OR IGNORE INTO signals
       (telegram_message_id, pair, direction, entry_price_min, entry_price_max,
@@ -229,8 +249,8 @@ function insertSignal(signal) {
     return { id: result.lastInsertRowid, ...signal };
   }
 
-  // Le signal existait déjà (doublon de message Telegram)
-  logger.warn(`Signal ignoré (doublon) : message Telegram ${signal.telegramMessageId}`);
+  // Le signal existait déjà (doublon de message Telegram ID)
+  logger.warn(`Signal ignoré (doublon telegram_message_id) : message Telegram ${signal.telegramMessageId}`);
   return null;
 }
 
