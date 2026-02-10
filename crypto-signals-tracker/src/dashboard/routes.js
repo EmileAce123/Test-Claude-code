@@ -353,7 +353,7 @@ router.get('/trades/active', (req, res) => {
     const activePositions = database.getActivePositions();
     const formatted = activePositions.map(s => {
       const executions = database.getTradeExecutions(s.id);
-      const targetsHit = executions.filter(e => e.target_number > 0).map(e => `TP${e.target_number}`);
+      const targetsHit = [...new Set(executions.filter(e => e.target_number > 0 && e.target_number !== 999).map(e => `TP${e.target_number}`))];
       return {
         ...s,
         targets: JSON.parse(s.targets),

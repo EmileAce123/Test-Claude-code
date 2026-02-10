@@ -4,6 +4,10 @@
 // Recupere les prix en temps reel et les donnees de marche
 // depuis l'API Binance pour calculer les profits reels.
 //
+// IMPORTANT : Les signaux sont des contrats FUTURES.
+// On utilise l'API Futures en priorite, avec fallback sur Spot
+// pour les paires qui ne sont pas listees en Futures.
+//
 // PHASE 1 : Lecture seule (pas de trading)
 // PHASE 2 (future) : Auto-trading avec strategie pyramidale
 //
@@ -40,34 +44,49 @@ class BinanceClient {
     });
 
     this.initialized = true;
-    logger.info('[BINANCE] Client initialise (mode READ-ONLY)');
+    logger.info('[BINANCE] Client initialise (mode READ-ONLY, Futures + Spot)');
   }
 
   /**
    * Recupere le prix actuel d'une paire.
+   * Essaie d'abord l'API Futures, puis fallback sur Spot.
    * @param {string} symbol - Ex: "BTCUSDT", "ETHUSDT"
    * @returns {number|null} Prix actuel ou null si erreur
    */
   async getCurrentPrice(symbol) {
     if (!this.initialized || !this.client) return null;
 
+    // 1. Essayer Futures d'abord (les signaux sont des contrats futures)
+    try {
+      const ticker = await this.client.futuresPrices({ symbol });
+      const price = parseFloat(ticker[symbol]);
+      if (!isNaN(price) && price > 0) {
+        logger.debug(`[BINANCE] Prix Futures ${symbol}: ${price}`);
+        return price;
+      }
+    } catch (error) {
+      logger.debug(`[BINANCE] Futures indisponible pour ${symbol}: ${error.message}`);
+    }
+
+    // 2. Fallback sur Spot
     try {
       const ticker = await this.client.prices({ symbol });
       const price = parseFloat(ticker[symbol]);
-      if (isNaN(price)) {
-        logger.warn(`[BINANCE] Prix invalide pour ${symbol}`);
-        return null;
+      if (!isNaN(price) && price > 0) {
+        logger.debug(`[BINANCE] Prix Spot (fallback) ${symbol}: ${price}`);
+        return price;
       }
-      logger.info(`[BINANCE] Prix ${symbol}: ${price}`);
-      return price;
     } catch (error) {
-      logger.error(`[BINANCE] Erreur prix ${symbol}: ${error.message}`);
-      return null;
+      logger.debug(`[BINANCE] Spot aussi indisponible pour ${symbol}: ${error.message}`);
     }
+
+    logger.warn(`[BINANCE] Prix non disponible pour ${symbol} (ni Futures ni Spot)`);
+    return null;
   }
 
   /**
    * Recupere les bougies (klines) pour calculer l'ATR.
+   * Essaie d'abord l'API Futures, puis fallback sur Spot.
    * @param {string} symbol - Ex: "BTCUSDT"
    * @param {string} interval - Ex: "15m", "1h"
    * @param {number} limit - Nombre de bougies (15 pour ATR 14)
@@ -76,20 +95,39 @@ class BinanceClient {
   async getCandles(symbol, interval = '15m', limit = 15) {
     if (!this.initialized || !this.client) return null;
 
+    const mapCandles = (candles) => candles.map(c => ({
+      time: c.closeTime,
+      open: parseFloat(c.open),
+      high: parseFloat(c.high),
+      low: parseFloat(c.low),
+      close: parseFloat(c.close),
+      volume: parseFloat(c.volume),
+    }));
+
+    // 1. Essayer Futures d'abord
+    try {
+      const candles = await this.client.futuresCandles({ symbol, interval, limit });
+      if (candles && candles.length > 0) {
+        logger.debug(`[BINANCE] Bougies Futures ${symbol}: ${candles.length} recues`);
+        return mapCandles(candles);
+      }
+    } catch (error) {
+      logger.debug(`[BINANCE] Bougies Futures indisponible pour ${symbol}: ${error.message}`);
+    }
+
+    // 2. Fallback sur Spot
     try {
       const candles = await this.client.candles({ symbol, interval, limit });
-      return candles.map(c => ({
-        time: c.closeTime,
-        open: parseFloat(c.open),
-        high: parseFloat(c.high),
-        low: parseFloat(c.low),
-        close: parseFloat(c.close),
-        volume: parseFloat(c.volume),
-      }));
+      if (candles && candles.length > 0) {
+        logger.debug(`[BINANCE] Bougies Spot (fallback) ${symbol}: ${candles.length} recues`);
+        return mapCandles(candles);
+      }
     } catch (error) {
-      logger.error(`[BINANCE] Erreur bougies ${symbol}: ${error.message}`);
-      return null;
+      logger.debug(`[BINANCE] Bougies Spot aussi indisponible pour ${symbol}: ${error.message}`);
     }
+
+    logger.warn(`[BINANCE] Bougies non disponibles pour ${symbol} (ni Futures ni Spot)`);
+    return null;
   }
 
   /**
@@ -129,7 +167,7 @@ class BinanceClient {
   }
 
   /**
-   * Teste la connexion a l'API Binance.
+   * Teste la connexion a l'API Binance (Futures puis Spot).
    * @returns {boolean} true si connecte
    */
   async testConnection() {
@@ -138,12 +176,22 @@ class BinanceClient {
       return false;
     }
 
+    // Tester Futures d'abord
     try {
-      await this.client.ping();
-      logger.info('[BINANCE] Connexion API OK');
+      await this.client.futuresPing();
+      logger.info('[BINANCE] Connexion API Futures OK');
       return true;
     } catch (error) {
-      logger.error(`[BINANCE] Erreur connexion: ${error.message}`);
+      logger.warn(`[BINANCE] Futures ping echoue: ${error.message}`);
+    }
+
+    // Fallback: tester Spot
+    try {
+      await this.client.ping();
+      logger.info('[BINANCE] Connexion API Spot OK (Futures indisponible)');
+      return true;
+    } catch (error) {
+      logger.error(`[BINANCE] Erreur connexion (Futures et Spot): ${error.message}`);
       return false;
     }
   }
