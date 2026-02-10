@@ -443,6 +443,31 @@ function resetPortfolioData() {
 // ============================================================
 
 /**
+ * Récupère un signal par son ID.
+ * @param {number} id - ID du signal
+ * @returns {Object|null} Le signal ou null
+ */
+function getSignalById(id) {
+  return db.prepare('SELECT * FROM signals WHERE id = ?').get(id) || null;
+}
+
+/**
+ * Récupère le capital actuel du portefeuille (dernier virtual_portfolio_after enregistré).
+ * @param {number} fallback - Capital par défaut si aucun trade n'a encore été calculé
+ * @returns {number} Capital actuel
+ */
+function getLastPortfolioCapital(fallback) {
+  const row = db.prepare(`
+    SELECT virtual_portfolio_after
+    FROM signals
+    WHERE virtual_portfolio_after IS NOT NULL
+    ORDER BY updated_at DESC, created_at DESC
+    LIMIT 1
+  `).get();
+  return row ? row.virtual_portfolio_after : fallback;
+}
+
+/**
  * Récupère tous les signaux avec un filtre optionnel par statut.
  * @param {string} [status] - Filtre par statut (open, tp_hit, sl_hit, cancelled)
  * @returns {Array} Liste des signaux
@@ -539,6 +564,8 @@ module.exports = {
   insertCancellation,
   insertStopLoss,
   insertEntryZone,
+  getSignalById,
+  getLastPortfolioCapital,
   getSignals,
   getSignalsSince,
   getConfirmations,

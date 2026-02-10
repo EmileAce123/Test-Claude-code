@@ -128,7 +128,9 @@ async function handleMessage(message) {
       case 'confirmation':
         // Target atteint
         const insertedConfirmation = database.insertConfirmation(parsed);
-        if (insertedConfirmation) {
+        if (insertedConfirmation && insertedConfirmation.signalId) {
+          // Mettre a jour le portefeuille immediatement
+          portfolio.processTradeForPortfolio(insertedConfirmation.signalId);
           await reporter.notifyConfirmation(parsed);
         }
         break;
@@ -141,6 +143,13 @@ async function handleMessage(message) {
       case 'stop_loss':
         // Stop loss touche
         database.insertStopLoss(parsed);
+        // Mettre a jour le portefeuille immediatement
+        if (parsed.pair) {
+          const slSignal = database.getSignals('sl_hit').find(s => s.pair === parsed.pair);
+          if (slSignal) {
+            portfolio.processTradeForPortfolio(slSignal.id);
+          }
+        }
         await reporter.notifyStopLoss(parsed);
         break;
 

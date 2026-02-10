@@ -3,10 +3,13 @@
 // ============================================================
 // Simule un portefeuille de trading virtuel qui part d'un capital
 // initial et applique chaque trade avec :
-// - Position sizing (% du capital disponible)
-// - Leverage reel extrait du signal
+// - Position sizing (% du capital ACTUEL)
 // - Frais de transaction (entree + sortie)
 // - Stop loss = liquidation de la position
+//
+// IMPORTANT : Le profit % fourni par Telegram INCLUT deja le leverage.
+// Le leverage n'est donc JAMAIS utilise dans les calculs de profit.
+// Il est stocke en BDD pour information/affichage uniquement.
 //
 // Le capital ne peut jamais etre negatif.
 // ============================================================
@@ -53,17 +56,20 @@ function calculateFee(amount) {
 /**
  * Calcule l'impact d'un trade sur le portefeuille.
  *
+ * IMPORTANT : Le profit % fourni par Telegram INCLUT deja le leverage.
+ * On ne multiplie donc JAMAIS par le leverage dans ces calculs.
+ *
  * Logique :
- * - Si TP hit : profit = position × leverage × (profitPct / 100)
- * - Si SL hit : perte = 100% de la position de base (liquidation)
- * - Frais appliques sur la position de base a l'entree et sur la valeur finale a la sortie
+ * - Si TP hit : profitBrut = positionSize × (profitPct / 100)
+ * - Si SL hit : perte = 100% de la position de base (liquidation) + frais
+ * - Frais : entry sur la position de base, exit sur la valeur finale
  *
  * @param {Object} signal - Signal depuis la BDD
- * @param {number} currentCapital - Capital avant ce trade
+ * @param {number} currentCapital - Capital ACTUEL avant ce trade
  * @returns {Object} { positionSize, feesEntry, feesExit, feesTotal, profitBrut, profitNet, capitalAfter, isWin }
  */
 function calculateTradeImpact(signal, currentCapital) {
-  // Taille de position (plafonnee a maxPositionPct du capital)
+  // Taille de position = maxPositionPct% du capital ACTUEL
   const positionSize = calculatePositionSize(currentCapital);
 
   // Si capital trop faible pour ouvrir une position
@@ -85,15 +91,13 @@ function calculateTradeImpact(signal, currentCapital) {
   // Frais d'entree (sur la position de base)
   const feesEntry = calculateFee(positionSize);
 
-  const leverage = signal.leverage || 1;
-
   if (signal.status === 'sl_hit') {
     // ---- STOP LOSS = LIQUIDATION ----
     // Perte totale de la position de base + frais d'entree
     const lossTotal = positionSize + feesEntry;
     const capitalAfter = Math.max(0, currentCapital - lossTotal);
 
-    logger.info(`[PORTFOLIO] SL ${signal.pair} : position=${positionSize.toFixed(2)}$ X${leverage} | perte=-${lossTotal.toFixed(2)}$ | capital=${capitalAfter.toFixed(2)}$`);
+    logger.info(`[PORTFOLIO] SL ${signal.pair} : position=${positionSize.toFixed(2)}$ | perte=-${lossTotal.toFixed(2)}$ | capital=${currentCapital.toFixed(2)}$ → ${capitalAfter.toFixed(2)}$`);
 
     return {
       positionSize,
@@ -110,12 +114,12 @@ function calculateTradeImpact(signal, currentCapital) {
 
   if (['tp_hit', 'all_tp_hit'].includes(signal.status)) {
     // ---- TAKE PROFIT ----
-    // Utiliser le profit du premier target (final_profit_pct)
+    // Le profit % de Telegram INCLUT DEJA le leverage
     let profitPct = 0;
     if (signal.final_profit_pct !== null && signal.final_profit_pct !== undefined) {
       profitPct = Math.abs(signal.final_profit_pct);
     } else {
-      // Calculer a partir des prix si pas de profit enregistre
+      // Fallback : calculer a partir des prix (sans leverage car les prix sont reels)
       const entryPrice = (signal.entry_price_min + signal.entry_price_max) / 2;
       const targets = JSON.parse(signal.targets);
       if (targets.length > 0) {
@@ -123,12 +127,14 @@ function calculateTradeImpact(signal, currentCapital) {
         const priceDiff = signal.direction === 'SHORT'
           ? entryPrice - firstTarget
           : firstTarget - entryPrice;
-        profitPct = Math.abs((priceDiff / entryPrice) * 100);
+        // Ici on multiplie par leverage car on calcule nous-memes depuis les prix
+        profitPct = Math.abs((priceDiff / entryPrice) * 100) * (signal.leverage || 1);
       }
     }
 
-    // Profit brut = position × leverage × (profitPct / 100)
-    const profitBrut = positionSize * leverage * (profitPct / 100);
+    // Profit brut = position × (profitPct / 100)
+    // PAS de multiplication par leverage : le % inclut deja le leverage
+    const profitBrut = positionSize * (profitPct / 100);
 
     // Valeur finale de la position
     const valeurFinale = positionSize + profitBrut;
@@ -141,7 +147,7 @@ function calculateTradeImpact(signal, currentCapital) {
 
     const capitalAfter = currentCapital + profitNet;
 
-    logger.info(`[PORTFOLIO] TP ${signal.pair} : position=${positionSize.toFixed(2)}$ X${leverage} | +${profitPct.toFixed(2)}% | profit net=+${profitNet.toFixed(2)}$ | capital=${capitalAfter.toFixed(2)}$`);
+    logger.info(`[PORTFOLIO] TP ${signal.pair} : position=${positionSize.toFixed(2)}$ | +${profitPct.toFixed(2)}% (leverage inclus) | profit net=+${profitNet.toFixed(2)}$ | capital=${currentCapital.toFixed(2)}$ → ${capitalAfter.toFixed(2)}$`);
 
     return {
       positionSize,
@@ -168,6 +174,50 @@ function calculateTradeImpact(signal, currentCapital) {
     isWin: false,
     skipped: true,
   };
+}
+
+/**
+ * Traite un trade cloture (TP ou SL) et met a jour le portefeuille immediatement.
+ * Utilise le capital actuel depuis la BDD (dernier virtual_portfolio_after).
+ *
+ * @param {number} signalId - ID du signal cloture
+ * @returns {Object|null} Impact du trade ou null si non applicable
+ */
+function processTradeForPortfolio(signalId) {
+  const signal = database.getSignalById(signalId);
+  if (!signal) {
+    logger.warn(`[PORTFOLIO] Signal #${signalId} non trouve`);
+    return null;
+  }
+
+  // Verifier que le signal est bien cloture (TP ou SL)
+  if (!['tp_hit', 'all_tp_hit', 'sl_hit'].includes(signal.status)) {
+    return null;
+  }
+
+  // Verifier que ce trade n'a pas deja ete calcule
+  if (signal.virtual_portfolio_after !== null) {
+    logger.info(`[PORTFOLIO] Signal #${signalId} deja calcule, skip`);
+    return null;
+  }
+
+  // Capital actuel = dernier virtual_portfolio_after ou capital initial
+  const currentCapital = database.getLastPortfolioCapital(config.startCapital);
+
+  const impact = calculateTradeImpact(signal, currentCapital);
+  if (impact.skipped) return null;
+
+  // Sauvegarder l'impact en BDD
+  database.updateSignalPortfolio(signalId, {
+    virtualPortfolioBefore: currentCapital,
+    virtualPortfolioAfter: impact.capitalAfter,
+    positionSize: impact.positionSize,
+    tradingFeesTotal: impact.feesTotal,
+    netProfitLoss: impact.profitNet,
+  });
+
+  logger.info(`[PORTFOLIO] Trade #${signalId} (${signal.pair}) : ${currentCapital.toFixed(2)}$ → ${impact.capitalAfter.toFixed(2)}$`);
+  return impact;
 }
 
 /**
@@ -317,6 +367,7 @@ module.exports = {
   calculatePositionSize,
   calculateFee,
   calculateTradeImpact,
+  processTradeForPortfolio,
   recalculateAll,
   getPortfolioSnapshot,
   getBestWorstTrades,
