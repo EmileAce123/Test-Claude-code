@@ -7,10 +7,11 @@
 // - Frais de transaction (entree + sortie)
 // - Stop loss = liquidation de la position
 //
-// IMPORTANT : Le profit est calcule depuis les prix reels (entry midpoint
-// et exit price), PAS depuis le profit % fourni par Telegram.
-// Formule : ((exitPrice - entryPrice) / entryPrice) * 100 * leverage
-// (inversee pour SHORT)
+// IMPORTANT : Le profit est base sur le profit % Telegram avec une
+// marge de securite de 15% :
+// - Gains : profit Telegram × 0.85 (reduit de 15%)
+// - Pertes : perte Telegram × 1.15 (amplifiee de 15%)
+// Cela tient compte de la latence, du slippage et des conditions reelles.
 //
 // Le capital ne peut jamais etre negatif.
 // ============================================================
@@ -57,8 +58,7 @@ function calculateFee(amount) {
 /**
  * Calcule l'impact d'un trade sur le portefeuille.
  *
- * Le profit est calcule depuis les prix (profit_calculated en BDD),
- * pas depuis le profit % fourni par Telegram.
+ * Utilise profit_calculated (profit Telegram × marge de securite).
  *
  * Logique :
  * - Si TP hit : profitBrut = positionSize × (profitCalculated / 100)
@@ -94,19 +94,15 @@ function calculateTradeImpact(signal, currentCapital) {
 
   if (signal.status === 'sl_hit') {
     // ---- STOP LOSS ----
-    // Perte calculee depuis les prix (entry midpoint -> stop loss * leverage)
-    let lossPct = 100; // Fallback : liquidation totale si pas de prix
+    // Utiliser profit_calculated (perte Telegram × 1.15)
+    let lossPct = 100; // Fallback : liquidation totale si pas de donnees
 
     if (signal.profit_calculated !== null && signal.profit_calculated !== undefined) {
-      // profit_calculated est negatif pour un SL -> on prend la valeur absolue
+      // profit_calculated est negatif pour un SL -> valeur absolue
       lossPct = Math.abs(signal.profit_calculated);
-    } else if (signal.stop_loss > 0) {
-      // Fallback : calculer depuis les prix stockes
-      const entryMid = signal.entry_price_used || (signal.entry_price_min + signal.entry_price_max) / 2;
-      const spotLoss = signal.direction === 'SHORT'
-        ? ((entryMid - signal.stop_loss) / entryMid) * 100
-        : ((signal.stop_loss - entryMid) / entryMid) * 100;
-      lossPct = Math.abs(spotLoss * (signal.leverage || 1));
+    } else if (signal.final_profit_pct !== null && signal.final_profit_pct !== undefined) {
+      // Fallback : utiliser final_profit_pct Telegram × marge
+      lossPct = Math.abs(signal.final_profit_pct) * 1.15;
     }
 
     // La perte ne peut pas depasser 100% de la position (pas de dette)
@@ -133,24 +129,17 @@ function calculateTradeImpact(signal, currentCapital) {
 
   if (['tp_hit', 'all_tp_hit'].includes(signal.status)) {
     // ---- TAKE PROFIT ----
-    // Utiliser profit_calculated (calcule depuis les prix, pas depuis Telegram)
+    // Utiliser profit_calculated (profit Telegram × 0.85)
     let profitPct = 0;
     if (signal.profit_calculated !== null && signal.profit_calculated !== undefined) {
       profitPct = Math.abs(signal.profit_calculated);
-    } else {
-      // Fallback : calculer depuis les prix stockes
-      const entryMid = signal.entry_price_used || (signal.entry_price_min + signal.entry_price_max) / 2;
-      const targets = JSON.parse(signal.targets);
-      const targetIdx = (signal.last_target_hit || 1) - 1;
-      const exitPrice = targets[targetIdx] !== undefined ? targets[targetIdx] : targets[0];
-      const spotProfit = signal.direction === 'SHORT'
-        ? ((entryMid - exitPrice) / entryMid) * 100
-        : ((exitPrice - entryMid) / entryMid) * 100;
-      profitPct = Math.abs(spotProfit * (signal.leverage || 1));
+    } else if (signal.final_profit_pct !== null && signal.final_profit_pct !== undefined) {
+      // Fallback : utiliser final_profit_pct Telegram × marge
+      profitPct = Math.abs(signal.final_profit_pct) * 0.85;
     }
 
     // Profit brut = position × (profitPct / 100)
-    // PAS de multiplication par leverage : le % inclut deja le leverage
+    // profitPct = profit Telegram avec marge de securite (-15%)
     const profitBrut = positionSize * (profitPct / 100);
 
     // Valeur finale de la position
@@ -164,7 +153,7 @@ function calculateTradeImpact(signal, currentCapital) {
 
     const capitalAfter = currentCapital + profitNet;
 
-    logger.info(`[PORTFOLIO] TP ${signal.pair} : position=${positionSize.toFixed(2)}$ | +${profitPct.toFixed(2)}% (leverage inclus) | profit net=+${profitNet.toFixed(2)}$ | capital=${currentCapital.toFixed(2)}$ → ${capitalAfter.toFixed(2)}$`);
+    logger.info(`[PORTFOLIO] TP ${signal.pair} : position=${positionSize.toFixed(2)}$ | +${profitPct.toFixed(2)}% (marge -15%) | profit net=+${profitNet.toFixed(2)}$ | capital=${currentCapital.toFixed(2)}$ → ${capitalAfter.toFixed(2)}$`);
 
     return {
       positionSize,

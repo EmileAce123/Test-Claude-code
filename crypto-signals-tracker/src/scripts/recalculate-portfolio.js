@@ -19,16 +19,16 @@ database.init(config.database.path);
 // Configurer le simulateur
 portfolio.configure(config.portfolio);
 
-// ETAPE 1 : Effacer toutes les anciennes valeurs de portefeuille et prix calcules
-console.log('[1/3] Reset des colonnes portfolio et prix calcules...');
+// ETAPE 1 : Effacer toutes les anciennes valeurs de portefeuille
+console.log('[1/3] Reset des colonnes portfolio...');
 database.resetPortfolioData();
 
-// ETAPE 2 : Recalculer les prix (entry midpoint, exit price, profit calcule)
-console.log('[2/3] Recalcul des prix depuis les donnees brutes...');
+// ETAPE 2 : Recalculer profit_calculated (profit Telegram × marge de securite)
+console.log('[2/3] Recalcul profit avec marge de securite (gains -15%, pertes +15%)...');
 database.recalculateAllPrices();
 
 // ETAPE 3 : Recalculer le portefeuille virtuel depuis zero
-console.log('[3/3] Recalcul complet du portefeuille (profit calcule depuis les prix)...\n');
+console.log('[3/3] Recalcul complet du portefeuille...\n');
 const result = portfolio.recalculateAll();
 
 console.log('\n--- Resultat ---');
