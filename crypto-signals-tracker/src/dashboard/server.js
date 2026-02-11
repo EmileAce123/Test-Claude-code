@@ -22,6 +22,7 @@ const database = require('../database');
 const portfolio = require('../portfolio-simulator');
 const binanceClient = require('../binance-client');
 const priceUpdater = require('../price-updater');
+const tradingEngine = require('../trading-engine');
 const logger = require('../logger');
 const auth = require('./auth');
 const apiRoutes = require('./routes');
@@ -51,6 +52,18 @@ portfolio.configure({
   tradingFeePct: parseFloat(process.env.TRADING_FEE_PERCENT || '0.5'),
 });
 logger.info('Dashboard : portefeuille virtuel configure');
+
+// ---- Initialiser le trading engine (pour positions, balance, kill switch) ----
+tradingEngine.init();
+if (tradingEngine.isActive()) {
+  tradingEngine.testConnection().then(ok => {
+    if (ok) {
+      logger.info(`Dashboard : Trading engine connecte (mode=${tradingEngine.mode})`);
+    } else {
+      logger.warn('Dashboard : Trading engine connexion echouee');
+    }
+  });
+}
 
 // ---- Initialiser le client Binance (pour prix temps reel + fermeture manuelle) ----
 binanceClient.init();
@@ -122,10 +135,12 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
   logger.info(`Dashboard web démarré sur le port ${PORT}`);
   logger.info(`Accès : http://localhost:${PORT}`);
+  const tradingMode = (process.env.TRADING_MODE || 'simulation').toUpperCase();
   console.log('');
   console.log('================================================');
   console.log(`  Dashboard accessible sur : http://localhost:${PORT}`);
   console.log(`  Login : ${DASH_USER}`);
+  console.log(`  Trading : ${tradingMode}`);
   console.log('================================================');
   console.log('');
 });

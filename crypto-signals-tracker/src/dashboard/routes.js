@@ -23,6 +23,7 @@ const statsCalculator = require('../stats-calculator');
 const portfolio = require('../portfolio-simulator');
 const binanceClient = require('../binance-client');
 const priceUpdater = require('../price-updater');
+const tradingEngine = require('../trading-engine');
 const logger = require('../logger');
 const fs = require('fs');
 const path = require('path');
@@ -515,6 +516,137 @@ router.get('/prices/current', (req, res) => {
   } catch (err) {
     logger.error(`Erreur API /prices/current : ${err.message}`);
     res.status(500).json({ error: 'Erreur recuperation des prix' });
+  }
+});
+
+// ---- GET /api/trading/status ----
+// Retourne l'etat du trading engine
+router.get('/trading/status', (req, res) => {
+  try {
+    const status = tradingEngine.getStatus();
+    res.json(status);
+  } catch (err) {
+    logger.error(`Erreur API /trading/status : ${err.message}`);
+    res.status(500).json({ error: 'Erreur status trading' });
+  }
+});
+
+// ---- GET /api/binance/balance ----
+// Retourne le solde reel Binance Futures
+router.get('/binance/balance', async (req, res) => {
+  try {
+    if (!tradingEngine.isActive()) {
+      // En mode simulation, retourner le capital virtuel
+      const snap = portfolio.getPortfolioSnapshot();
+      return res.json({
+        balance: snap.current,
+        mode: tradingEngine.mode || 'simulation',
+        source: 'simulation',
+      });
+    }
+
+    const balance = await tradingEngine.getAccountBalance();
+    const info = await tradingEngine.getAccountInfo();
+
+    res.json({
+      balance: info.availableBalance,
+      totalBalance: info.totalBalance,
+      unrealizedPnl: info.unrealizedPnl,
+      marginBalance: info.marginBalance,
+      mode: tradingEngine.mode,
+      source: 'binance',
+    });
+  } catch (err) {
+    logger.error(`Erreur API /binance/balance : ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- GET /api/binance/positions ----
+// Retourne les positions ouvertes reelles depuis Binance
+router.get('/binance/positions', async (req, res) => {
+  try {
+    if (!tradingEngine.isActive()) {
+      // En mode simulation, retourner les positions de la BDD
+      const activePositions = database.getActivePositions();
+      return res.json({
+        positions: activePositions.map(s => ({
+          id: s.id,
+          pair: s.pair,
+          direction: s.direction,
+          leverage: s.leverage,
+          entryPrice: s.entry_price_real,
+          currentPrice: s.current_price,
+          positionSize: s.position_size_initial,
+          pnlLatent: s.profit_latent,
+          liquidationPrice: null,
+          status: s.status,
+        })),
+        mode: 'simulation',
+        source: 'database',
+      });
+    }
+
+    const positions = await tradingEngine.syncPositions();
+
+    res.json({
+      positions: positions.map(p => ({
+        symbol: p.symbol,
+        pair: p.symbol.replace('USDT', '/USDT'),
+        direction: p.side,
+        leverage: p.leverage,
+        entryPrice: p.entryPrice,
+        currentPrice: p.currentPrice,
+        quantity: p.quantity,
+        positionSize: p.quantity * p.entryPrice / p.leverage,
+        pnlLatent: p.unrealizedPnl,
+        liquidationPrice: p.liquidationPrice,
+        marginType: p.marginType,
+      })),
+      mode: tradingEngine.mode,
+      source: 'binance',
+    });
+  } catch (err) {
+    logger.error(`Erreur API /binance/positions : ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- POST /api/emergency/close-all ----
+// Kill switch : ferme toutes les positions d'urgence
+router.post('/emergency/close-all', async (req, res) => {
+  try {
+    if (!tradingEngine.killSwitchEnabled) {
+      return res.status(403).json({ error: 'Kill switch desactive dans la config' });
+    }
+
+    if (!tradingEngine.isActive()) {
+      return res.status(400).json({ error: 'Trading engine non actif (mode simulation)' });
+    }
+
+    logger.error('[API] KILL SWITCH ACTIVE DEPUIS LE DASHBOARD');
+    const result = await tradingEngine.emergencyCloseAll();
+
+    res.json({
+      success: true,
+      message: `${result.closed} position(s) fermee(s), ${result.errors} erreur(s)`,
+      ...result,
+    });
+  } catch (err) {
+    logger.error(`Erreur API /emergency/close-all : ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---- POST /api/trading/kill-switch/reset ----
+// Desactive le kill switch pour reprendre le trading
+router.post('/trading/kill-switch/reset', (req, res) => {
+  try {
+    tradingEngine.resetKillSwitch();
+    res.json({ success: true, message: 'Kill switch desactive' });
+  } catch (err) {
+    logger.error(`Erreur API /trading/kill-switch/reset : ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
 });
 

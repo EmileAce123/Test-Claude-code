@@ -84,4 +84,18 @@ module.exports = {
     maxPositionPct: parseFloat(process.env.MAX_POSITION_SIZE_PERCENT || '10'),
     tradingFeePct: parseFloat(process.env.TRADING_FEE_PERCENT || '0.5'),
   },
+
+  // Trading automatique
+  trading: {
+    mode: process.env.TRADING_MODE || 'simulation',
+    enabled: process.env.ENABLE_AUTO_TRADING === 'true',
+    maxPositionPercent: parseFloat(process.env.MAX_POSITION_PERCENT || '5'),
+    maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || '20', 10),
+    maxDailyLossPercent: parseFloat(process.env.MAX_DAILY_LOSS_PERCENT || '10'),
+    killSwitchEnabled: process.env.ENABLE_KILL_SWITCH === 'true',
+    testnet: {
+      apiKey: process.env.BINANCE_TESTNET_API_KEY || '',
+      apiSecret: process.env.BINANCE_TESTNET_API_SECRET || '',
+    },
+  },
 };

@@ -215,6 +215,10 @@ function runMigrations() {
     { table: 'signals', column: 'profit_realized_total', type: 'REAL DEFAULT 0' },
     { table: 'signals', column: 'profit_latent', type: 'REAL' },
     { table: 'signals', column: 'pnl_total', type: 'REAL' },
+    // Colonnes pour le trading reel Binance
+    { table: 'signals', column: 'binance_order_id', type: 'TEXT' },
+    { table: 'signals', column: 'binance_status', type: "TEXT DEFAULT 'none'" },
+    { table: 'trade_executions', column: 'binance_order_id', type: 'TEXT' },
   ];
 
   for (const { table, column, type } of columnsToAdd) {
@@ -712,6 +716,71 @@ function resetPortfolioData() {
 }
 
 // ============================================================
+// TRADING ENGINE - FONCTIONS DATA
+// ============================================================
+
+/**
+ * Met a jour l'order ID Binance et le prix d'entree reel.
+ * @param {number} signalId - ID du signal
+ * @param {Object} data - { binanceOrderId, entryPriceReal }
+ */
+function updateSignalBinanceOrder(signalId, data) {
+  const fields = [];
+  const params = { signalId };
+
+  if (data.binanceOrderId !== undefined) {
+    fields.push('binance_order_id = @binanceOrderId');
+    params.binanceOrderId = data.binanceOrderId;
+  }
+  if (data.entryPriceReal !== undefined) {
+    fields.push('entry_price_real = @entryPriceReal');
+    params.entryPriceReal = data.entryPriceReal;
+  }
+  if (data.binanceStatus !== undefined) {
+    fields.push('binance_status = @binanceStatus');
+    params.binanceStatus = data.binanceStatus;
+  }
+
+  if (fields.length > 0) {
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    db.prepare(`UPDATE signals SET ${fields.join(', ')} WHERE id = @signalId`).run(params);
+  }
+}
+
+/**
+ * Compte les trades ouverts aujourd'hui (pour limite quotidienne).
+ * @returns {number} Nombre de trades ouverts aujourd'hui
+ */
+function countTodayTrades() {
+  const result = db.prepare(
+    "SELECT COUNT(*) as count FROM signals WHERE date(created_at) = date('now')"
+  ).get();
+  return result.count;
+}
+
+/**
+ * Calcule le P&L total des trades fermes aujourd'hui.
+ * @returns {number} P&L en dollars
+ */
+function getTodayPnl() {
+  const result = db.prepare(
+    "SELECT COALESCE(SUM(net_profit_loss), 0) as pnl FROM signals WHERE date(updated_at) = date('now') AND status IN ('closed', 'stopped', 'manual_close')"
+  ).get();
+  return result.pnl;
+}
+
+/**
+ * Trouve un signal ouvert/partiel pour une paire donnee.
+ * @param {string} pair - Ex: "BTC/USDT"
+ * @returns {Object|null} Signal ou null
+ */
+function findOpenSignal(pair) {
+  return db.prepare(
+    "SELECT * FROM signals WHERE pair = ? AND status IN ('open', 'partial') ORDER BY created_at DESC LIMIT 1"
+  ).get(pair) || null;
+}
+
+// ============================================================
 // OPÉRATIONS DE LECTURE
 // ============================================================
 
@@ -862,4 +931,9 @@ module.exports = {
   getStopLosses,
   getOpenTrades,
   updateSignalCurrentPrice,
+  // Trading engine
+  updateSignalBinanceOrder,
+  countTodayTrades,
+  getTodayPnl,
+  findOpenSignal,
 };

@@ -32,6 +32,7 @@ async function refreshAll() {
       loadActivePositions(),
       checkHealth(),
       updateRealtimeIndicator(),
+      loadTradingStatus(),
     ]);
     document.getElementById('lastRefresh').textContent =
       'Maj : ' + new Date().toLocaleTimeString('fr-FR');
@@ -859,6 +860,83 @@ function timeAgo(dateStr) {
   if (diffMin < 60) return diffMin + 'min';
   const diffH = Math.floor(diffMin / 60);
   return diffH + 'h' + (diffMin % 60) + 'min';
+}
+
+// ============================================================
+// TRADING STATUS & KILL SWITCH
+// ============================================================
+
+async function loadTradingStatus() {
+  try {
+    const [statusRes, balanceRes] = await Promise.all([
+      fetch('/api/trading/status'),
+      fetch('/api/binance/balance'),
+    ]);
+
+    if (statusRes.status === 401) return;
+
+    const status = await statusRes.json();
+    const balance = await balanceRes.json();
+
+    // Mode badge
+    const badge = document.getElementById('tradingModeBadge');
+    if (badge) {
+      const mode = status.mode || 'simulation';
+      badge.textContent = mode.toUpperCase();
+      badge.className = 'trading-mode-badge mode-' + mode;
+    }
+
+    // Balance
+    const balanceEl = document.getElementById('tradingBalance');
+    if (balanceEl && balance.balance != null) {
+      balanceEl.textContent = balance.balance.toFixed(2) + ' USDT';
+      if (balance.unrealizedPnl != null && balance.unrealizedPnl !== 0) {
+        balanceEl.textContent += ' (PnL: ' + (balance.unrealizedPnl >= 0 ? '+' : '') + balance.unrealizedPnl.toFixed(2) + '$)';
+      }
+    }
+
+    // Kill switch button
+    const killBtn = document.getElementById('killSwitchBtn');
+    if (killBtn) {
+      if (status.mode !== 'simulation' && status.killSwitchEnabled) {
+        killBtn.style.display = 'inline-block';
+        if (status.killSwitchActive) {
+          killBtn.textContent = 'KILL ACTIVE';
+          killBtn.disabled = true;
+        }
+      } else {
+        killBtn.style.display = 'none';
+      }
+    }
+
+  } catch (err) {
+    console.error('Erreur trading status:', err);
+  }
+}
+
+async function emergencyCloseAll() {
+  if (!confirm('FERMER TOUTES LES POSITIONS ?\n\nCette action est irreversible et ferme immediatement TOUTES les positions ouvertes sur Binance.')) {
+    return;
+  }
+
+  // Double confirmation
+  if (!confirm('CONFIRMATION FINALE\n\nVoulez-vous vraiment activer le KILL SWITCH ?')) {
+    return;
+  }
+
+  try {
+    const response = await fetch('/api/emergency/close-all', { method: 'POST' });
+    const data = await response.json();
+
+    if (data.success) {
+      alert('Kill switch active.\n' + data.message);
+      refreshAll();
+    } else {
+      alert('Erreur: ' + (data.error || 'Erreur inconnue'));
+    }
+  } catch (err) {
+    alert('Erreur: ' + err.message);
+  }
 }
 
 async function logout() {

@@ -21,6 +21,7 @@ const database = require('./database');
 const reporter = require('./reporter');
 const portfolio = require('./portfolio-simulator');
 const binanceClient = require('./binance-client');
+const tradingEngine = require('./trading-engine');
 const logger = require('./logger');
 
 /**
@@ -49,6 +50,20 @@ async function main() {
     }
   } else {
     logger.warn('Client Binance non configure (cles API manquantes), fallback sur profit Telegram');
+  }
+
+  // ---- Etape 2c : Initialiser le trading engine ----
+  logger.info('[2c/6] Initialisation du trading engine...');
+  tradingEngine.init();
+  if (tradingEngine.isActive()) {
+    const tradingOk = await tradingEngine.testConnection();
+    if (tradingOk) {
+      logger.info(`Trading engine connecte (mode=${tradingEngine.mode})`);
+    } else {
+      logger.warn('Trading engine : connexion echouee, ordres desactives');
+    }
+    // Enregistrer le callback pour les alertes Telegram
+    // (sera actif apres init du reporter)
   }
 
   // ---- Etape 3 : Connexion au compte Telegram (MTProto) ----
@@ -88,16 +103,27 @@ async function main() {
   await reporter.init(config.bot);
   reporter.scheduleReports(config.reports);
 
+  // Connecter le trading engine aux alertes Telegram
+  if (tradingEngine.isActive()) {
+    tradingEngine.setAlertCallback(async (msg) => {
+      await reporter.sendReport(msg);
+    });
+  }
+
   // ---- Etape 6 : Ecouter les messages de TOUS les groupes ----
   logger.info('[6/6] Demarrage de l\'ecoute multi-groupes...');
   await telegramClient.listenToGroups(resolvedGroups, handleMessage);
 
   // Notification de demarrage reussi
   const groupList = resolvedGroups.map(g => `• "${g.name}" (ID: ${g.id})`).join('\n');
+  const tradingStatus = tradingEngine.isActive()
+    ? `\nTrading: ${tradingEngine.mode.toUpperCase()} (auto=${tradingEngine.enabled ? 'ON' : 'OFF'})`
+    : '\nTrading: SIMULATION (virtuel)';
   await reporter.sendReport(
     '🟢 *Crypto Signals Tracker demarre !*\n\n' +
     `Groupes surveilles (${resolvedGroups.length}) :\n` +
-    groupList + '\n\n' +
+    groupList + '\n' +
+    tradingStatus + '\n\n' +
     '🔧 _Diagnostic actif : les messages sont logues._\n' +
     'En attente de signaux...'
   );
@@ -218,18 +244,52 @@ async function handleMessage(message) {
 
     // Traiter selon le type de message
     switch (parsed.type) {
-      case 'signal':
+      case 'signal': {
         // Nouveau signal de trading
         const insertedSignal = database.insertSignal(parsed);
         if (insertedSignal) {
-          // Initialiser la position pyramidale
+          // Initialiser la position pyramidale (simulation)
           portfolio.initPosition(insertedSignal.id);
           // Recuperer le prix reel d'entree depuis Binance
           await fetchAndStoreEntryPrice(insertedSignal);
+          // Trading reel : ouvrir position sur Binance
+          if (tradingEngine.isActive()) {
+            const order = await tradingEngine.openPosition(parsed, insertedSignal.id);
+            if (order) {
+              // Attendre un peu puis verifier + placer les TPs
+              setTimeout(async () => {
+                try {
+                  const symbol = parsed.pair.replace('/', '');
+                  const filled = await tradingEngine.isOrderFilled(symbol, order.orderId);
+                  if (filled) {
+                    await tradingEngine.placeTakeProfitOrders(parsed, insertedSignal.id);
+                    logger.info(`[TRADING] TPs places pour ${parsed.pair} (ordre ${order.orderId} rempli)`);
+                  } else {
+                    logger.info(`[TRADING] Ordre ${order.orderId} pas encore rempli, TPs en attente`);
+                    // Reessayer dans 30s
+                    setTimeout(async () => {
+                      try {
+                        const filledLater = await tradingEngine.isOrderFilled(symbol, order.orderId);
+                        if (filledLater) {
+                          await tradingEngine.placeTakeProfitOrders(parsed, insertedSignal.id);
+                          logger.info(`[TRADING] TPs places pour ${parsed.pair} (2eme tentative)`);
+                        }
+                      } catch (err) {
+                        logger.error(`[TRADING] Erreur 2eme check TPs: ${err.message}`);
+                      }
+                    }, 30000);
+                  }
+                } catch (err) {
+                  logger.error(`[TRADING] Erreur check/place TPs: ${err.message}`);
+                }
+              }, 10000); // Attendre 10s avant de verifier
+            }
+          }
           // Notifier via le bot
           await reporter.notifyNewSignal(parsed);
         }
         break;
+      }
 
       case 'confirmation':
         // Target atteint - execution pyramidale
@@ -255,27 +315,29 @@ async function handleMessage(message) {
         database.insertCancellation(parsed);
         break;
 
-      case 'stop_loss':
+      case 'stop_loss': {
         // Stop loss touche - fermer position restante via pyramide
         database.insertStopLoss(parsed);
         if (parsed.pair) {
           // Trouver le signal concerne (le plus recent open/partial pour cette paire)
-          const allSignals = database.getSignals();
-          const slSignal = allSignals.find(s =>
-            s.pair === parsed.pair && ['open', 'partial'].includes(s.status)
-          );
+          const slSignal = database.findOpenSignal(parsed.pair);
           if (slSignal) {
             // Recuperer le prix reel de sortie depuis Binance
             await fetchAndStoreExitPrice(slSignal.id, parsed.lossPct);
-            // Executer le stop loss pyramidal (ferme 100% restant)
+            // Executer le stop loss pyramidal (ferme 100% restant) - simulation
             const slResult = portfolio.executePyramidSL(slSignal.id, parsed.lossPct);
             if (slResult) {
               logger.info(`[TRADE] ${parsed.pair} SL : ferme ${slResult.percentClosed}% restant | perte=-${slResult.lossNet.toFixed(2)}$ | P&L total=${slResult.pnlTotal.toFixed(2)}$`);
+            }
+            // Trading reel : fermer sur Binance (si pas deja fait par STOP_MARKET)
+            if (tradingEngine.isActive()) {
+              await tradingEngine.closePosition(slSignal, 'stop_loss');
             }
           }
         }
         await reporter.notifyStopLoss(parsed);
         break;
+      }
 
       case 'entry_zone':
         // Entree en zone de prix

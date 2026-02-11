@@ -18,6 +18,8 @@
       </div>
     </div>
     <div class="header-right">
+      <span class="trading-mode-badge" id="tradingModeBadge">--</span>
+      <span class="trading-balance" id="tradingBalance"></span>
       <div class="realtime-indicator" id="realtimeIndicator">
         <span class="rt-dot" id="rtDot"></span>
         <span id="rtText">--</span>
@@ -25,6 +27,7 @@
       <span class="last-refresh" id="lastRefresh"></span>
       <button class="btn" onclick="refreshAll()">Rafraichir</button>
       <a class="btn" href="/api/export-csv">Export CSV</a>
+      <button class="btn btn-kill-switch" id="killSwitchBtn" onclick="emergencyCloseAll()" style="display:none">KILL SWITCH</button>
       <button class="btn btn-logout" onclick="logout()">Deconnexion</button>
     </div>
   </header>

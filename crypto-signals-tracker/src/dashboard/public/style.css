@@ -866,3 +866,62 @@ tbody tr:hover {
     width: 100%;
   }
 }
+
+/* ---- Trading Mode Badge ---- */
+.trading-mode-badge {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.mode-simulation {
+  background: var(--accent-blue);
+  color: #000;
+}
+
+.mode-testnet {
+  background: var(--accent-orange);
+  color: #000;
+}
+
+.mode-live {
+  background: var(--accent-red);
+  color: #fff;
+  animation: pulse-live 2s infinite;
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.trading-balance {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* ---- Kill Switch Button ---- */
+.btn-kill-switch {
+  background: #dc2626 !important;
+  color: white !important;
+  border: 2px solid #991b1b !important;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.btn-kill-switch:hover {
+  background: #b91c1c !important;
+  transform: scale(1.05);
+}
+
+.btn-kill-switch:disabled {
+  background: #666 !important;
+  border-color: #444 !important;
+  cursor: not-allowed;
+  transform: none;
+}
