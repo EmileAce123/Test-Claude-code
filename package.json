@@ -1,0 +1,25 @@
+{
+  "name": "crypto-arbitrage-bot",
+  "version": "1.0.0",
+  "description": "Crypto arbitrage scanner across Binance, Coinbase, Kraken, and Bybit",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dashboard": "node dashboard.js",
+    "dev": "node --watch src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:54209/git/EmileAce123/Test-Claude-code"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.13.4",
+    "better-sqlite3": "^12.6.2",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "node-cron": "^4.2.1"
+  }
+}
