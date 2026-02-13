@@ -91,6 +91,17 @@ async function loadStats() {
 
 async function loadTrades() {
   try {
+    // En mode trading reel, cacher la section trades (pas de portfolio virtuel)
+    const statusRes = await fetch('/api/trading/status');
+    if (statusRes.ok) {
+      const tradingStatus = await statusRes.json();
+      var tradesSection = document.getElementById('tradesSection');
+      if (tradingStatus.mode !== 'simulation' && tradesSection) {
+        tradesSection.style.display = 'none';
+        return;
+      }
+    }
+
     const group = document.getElementById('filterGroup').value;
     const status = document.getElementById('filterStatus').value;
     const pair = document.getElementById('filterPair').value;
