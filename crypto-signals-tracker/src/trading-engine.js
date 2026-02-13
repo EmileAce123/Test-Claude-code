@@ -234,7 +234,7 @@ class TradingEngine {
 
     // Cacher pour les appels suivants
     this.symbolInfoCache[symbol] = info;
-    logger.info(`[TRADING] symbolInfo ${symbol}: qtyPrec=${info.quantityPrecision}, pricePrec=${info.pricePrecision}, minQty=${info.minQty}, stepSize=${info.stepSize}`);
+    logger.info(`[TRADING] symbolInfo ${symbol}: qtyPrec=${info.quantityPrecision}, pricePrec=${info.pricePrecision}, minQty=${info.minQty}, stepSize=${info.stepSize}, tickSize=${info.tickSize}`);
 
     return info;
   }
@@ -248,6 +248,23 @@ class TradingEngine {
   roundToPrecision(value, precision) {
     const multiplier = Math.pow(10, precision);
     return Math.floor(value * multiplier) / multiplier;
+  }
+
+  /**
+   * Arrondit un prix au tickSize Binance le plus proche (arrondi vers le bas).
+   * Le prix doit etre un multiple exact du tickSize.
+   * @param {number} price - Prix brut
+   * @param {number} tickSize - Increment minimum de prix
+   * @param {number} pricePrecision - Nombre de decimales pour le prix
+   * @returns {number}
+   */
+  roundToTickSize(price, tickSize, pricePrecision) {
+    if (tickSize > 0) {
+      price = Math.round(price / tickSize) * tickSize;
+    }
+    // Arrondir a la precision pour eviter les erreurs de virgule flottante
+    const multiplier = Math.pow(10, pricePrecision);
+    return Math.round(price * multiplier) / multiplier;
   }
 
   /**
@@ -396,10 +413,10 @@ class TradingEngine {
       }
       // Arrondir selon la precision
       quantity = this.roundToPrecision(quantity, symbolInfo.quantityPrecision);
-      const roundedPrice = this.roundToPrecision(entryPrice, symbolInfo.pricePrecision);
+      const roundedPrice = this.roundToTickSize(entryPrice, symbolInfo.tickSize, symbolInfo.pricePrecision);
 
       logger.info(`[TRADING] Etape 6: Calcul -> position=${positionSize.toFixed(2)}$, leverage=${leverage}x, notional=${notional.toFixed(2)}$`);
-      logger.info(`[TRADING]   Prix: brut=${entryPrice} -> arrondi=${roundedPrice} (precision=${symbolInfo.pricePrecision})`);
+      logger.info(`[TRADING]   Prix: brut=${entryPrice} -> arrondi=${roundedPrice} (precision=${symbolInfo.pricePrecision}, tickSize=${symbolInfo.tickSize})`);
       logger.info(`[TRADING]   Quantite: brute=${notional / entryPrice} -> arrondie=${quantity} (precision=${symbolInfo.quantityPrecision}, stepSize=${symbolInfo.stepSize})`);
 
       // Verifier min/max qty
@@ -502,7 +519,9 @@ class TradingEngine {
           qtyToClose = Math.floor(qtyToClose / symbolInfo.stepSize) * symbolInfo.stepSize;
         }
         qtyToClose = this.roundToPrecision(qtyToClose, symbolInfo.quantityPrecision);
-        const roundedPrice = this.roundToPrecision(targetPrice, symbolInfo.pricePrecision);
+        const roundedPrice = this.roundToTickSize(targetPrice, symbolInfo.tickSize, symbolInfo.pricePrecision);
+
+        logger.info(`[TRADING] TP${targetNum}: prix brut=${targetPrice} -> tickSize=${roundedPrice} (tickSize=${symbolInfo.tickSize})`);
 
         if (qtyToClose < symbolInfo.minQty) {
           logger.warn(`[TRADING] TP${targetNum} quantite ${qtyToClose} < min ${symbolInfo.minQty}, skip`);
@@ -533,7 +552,7 @@ class TradingEngine {
       if (signal.stopLoss && signal.stopLoss > 0) {
         try {
           const slSide = signal.direction === 'LONG' ? 'SELL' : 'BUY';
-          const roundedSLPrice = this.roundToPrecision(signal.stopLoss, symbolInfo.pricePrecision);
+          const roundedSLPrice = this.roundToTickSize(signal.stopLoss, symbolInfo.tickSize, symbolInfo.pricePrecision);
 
           await this.client.futuresOrder({
             symbol,
@@ -566,7 +585,7 @@ class TradingEngine {
     try {
       const symbolInfo = await this.getSymbolInfo(symbol);
       const slSide = direction === 'LONG' ? 'SELL' : 'BUY';
-      const roundedPrice = this.roundToPrecision(stopPrice, symbolInfo.pricePrecision);
+      const roundedPrice = this.roundToTickSize(stopPrice, symbolInfo.tickSize, symbolInfo.pricePrecision);
 
       await this.client.futuresOrder({
         symbol,
