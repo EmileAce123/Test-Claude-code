@@ -207,24 +207,28 @@ class TradingEngine {
    * @returns {{ valid: boolean, reasons: string[] }}
    */
   async validateTrade(signal, balance) {
+    logger.info(`[TRADING] validateTrade() pour ${signal.pair} ${signal.direction} (balance=${balance.toFixed(2)}$)`);
     const reasons = [];
 
     // Kill switch actif
     if (this.killSwitchActive) {
       reasons.push('Kill switch actif');
     }
+    logger.debug(`[TRADING]   Kill switch: ${this.killSwitchActive ? 'ACTIF (bloque)' : 'OK'}`);
 
     // Balance suffisante
     const positionSize = balance * (this.maxPositionPercent / 100);
     if (positionSize < 5) {
       reasons.push(`Balance insuffisante (position=${positionSize.toFixed(2)}$ < 5$)`);
     }
+    logger.debug(`[TRADING]   Balance: position=${positionSize.toFixed(2)}$ (${this.maxPositionPercent}% de ${balance.toFixed(2)}$) -> ${positionSize >= 5 ? 'OK' : 'INSUFFISANT'}`);
 
     // Nombre de trades quotidiens
     const todayCount = database.countTodayTrades();
     if (todayCount >= this.maxDailyTrades) {
       reasons.push(`Limite quotidienne atteinte (${todayCount}/${this.maxDailyTrades})`);
     }
+    logger.debug(`[TRADING]   Trades aujourd'hui: ${todayCount}/${this.maxDailyTrades} -> ${todayCount < this.maxDailyTrades ? 'OK' : 'LIMITE'}`);
 
     // Perte quotidienne max
     const todayPnl = database.getTodayPnl();
@@ -232,11 +236,22 @@ class TradingEngine {
     if (todayPnl < -maxLoss) {
       reasons.push(`Perte max quotidienne atteinte (${todayPnl.toFixed(2)}$ > -${maxLoss.toFixed(2)}$)`);
     }
+    logger.debug(`[TRADING]   PnL aujourd'hui: ${todayPnl.toFixed(2)}$ (max perte: -${maxLoss.toFixed(2)}$) -> ${todayPnl >= -maxLoss ? 'OK' : 'PERTE MAX'}`);
 
-    // Pas de doublon (position deja ouverte sur cette paire)
-    const existing = database.findOpenSignal(signal.pair);
-    if (existing) {
-      reasons.push(`Position deja ouverte sur ${signal.pair} (signal #${existing.id})`);
+
+    // Pas de doublon : verifier les positions REELLES sur Binance (pas la BDD)
+    try {
+      const symbol = signal.pair.replace('/', '');
+      const positions = await this.client.futuresPositionRisk({ symbol });
+      const openPos = positions.find(p => p.symbol === symbol && Math.abs(parseFloat(p.positionAmt)) > 0);
+      if (openPos) {
+        const qty = Math.abs(parseFloat(openPos.positionAmt));
+        reasons.push(`Position Binance deja ouverte sur ${symbol} (qty=${qty})`);
+      }
+      logger.debug(`[TRADING] Check doublon Binance ${symbol}: ${openPos ? 'POSITION EXISTANTE' : 'pas de position'}`);
+    } catch (err) {
+      logger.warn(`[TRADING] Impossible de verifier positions Binance pour doublon: ${err.message}`);
+      // En cas d'erreur, on ne bloque PAS le trade (fail-open pour le doublon uniquement)
     }
 
     if (reasons.length > 0) {
@@ -253,24 +268,31 @@ class TradingEngine {
    * @returns {Object|null} Ordre Binance ou null
    */
   async openPosition(signal, signalId) {
+    logger.info(`[TRADING] === openPosition() appele pour ${signal.pair} ${signal.direction} (signalId=${signalId}) ===`);
+
     if (!this.enabled || !this.initialized || !this.client) {
-      logger.info(`[TRADING] Trade ignore (mode=${this.mode}, enabled=${this.enabled})`);
+      logger.info(`[TRADING] Trade ignore (mode=${this.mode}, enabled=${this.enabled}, initialized=${this.initialized})`);
       return null;
     }
 
     try {
       // 1. Verifier capital disponible
+      logger.info(`[TRADING] Etape 1: Verification du capital...`);
       const balance = await this.getAccountBalance();
+      logger.info(`[TRADING] Balance disponible: ${balance.toFixed(2)} USDT`);
 
-      // 2. Valider le trade
+      // 2. Valider le trade (verification Binance, pas BDD)
+      logger.info(`[TRADING] Etape 2: Validation du trade...`);
       const validation = await this.validateTrade(signal, balance);
       if (!validation.valid) {
+        logger.warn(`[TRADING] Trade REFUSE pour ${signal.pair}: ${validation.reasons.join(', ')}`);
         await this.sendAlert(
           `[TRADING] Trade refuse: ${signal.pair} ${signal.direction}\n` +
           `Raisons: ${validation.reasons.join(', ')}`
         );
         return null;
       }
+      logger.info(`[TRADING] Validation OK pour ${signal.pair}`);
 
       const positionSize = balance * (this.maxPositionPercent / 100);
       const symbol = signal.pair.replace('/', '');
@@ -283,7 +305,10 @@ class TradingEngine {
       const notional = positionSize * leverage;
       const quantity = notional / entryPrice;
 
+      logger.info(`[TRADING] Etape 3-4: Calcul position -> taille=${positionSize.toFixed(2)}$, entry=${entryPrice}, qty=${quantity}, notional=${notional.toFixed(2)}$`);
+
       // 5. Definir le leverage sur Binance
+      logger.info(`[TRADING] Etape 5: Configuration leverage ${leverage}x sur ${symbol}...`);
       try {
         await this.client.futuresLeverage({
           symbol,
@@ -295,6 +320,7 @@ class TradingEngine {
       }
 
       // 6. Passer l'ordre LIMIT
+      logger.info(`[TRADING] Etape 6: Passage de l'ordre LIMIT...`);
       const side = signal.direction === 'LONG' ? 'BUY' : 'SELL';
 
       // Formater quantite et prix selon les regles Binance

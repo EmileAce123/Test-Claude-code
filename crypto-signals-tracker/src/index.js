@@ -250,8 +250,14 @@ async function handleMessage(message) {
     switch (parsed.type) {
       case 'signal': {
         // Nouveau signal de trading
+        logger.info(`[SIGNAL] === Nouveau signal detecte: ${parsed.pair} ${parsed.direction} X${parsed.leverage} ===`);
+        logger.info(`[SIGNAL] Targets: ${JSON.stringify(parsed.targets)} | SL: ${parsed.stopLoss} | Entry: ${parsed.entryPriceMin}-${parsed.entryPriceMax}`);
+        logger.info(`[SIGNAL] Trading engine actif: ${tradingEngine.isActive()} (mode=${tradingEngine.mode}, enabled=${tradingEngine.enabled})`);
+
         const insertedSignal = database.insertSignal(parsed);
         if (insertedSignal) {
+          logger.info(`[SIGNAL] Signal insere en BDD avec ID #${insertedSignal.id}`);
+
           // Initialiser la position pyramidale (simulation uniquement)
           if (!tradingEngine.isActive()) {
             portfolio.initPosition(insertedSignal.id);
@@ -260,8 +266,10 @@ async function handleMessage(message) {
           await fetchAndStoreEntryPrice(insertedSignal);
           // Trading reel : ouvrir position sur Binance
           if (tradingEngine.isActive()) {
+            logger.info(`[SIGNAL] Lancement de openPosition() pour ${parsed.pair}...`);
             const order = await tradingEngine.openPosition(parsed, insertedSignal.id);
             if (order) {
+              logger.info(`[SIGNAL] Ordre Binance place avec succes: orderId=${order.orderId}`);
               // Attendre un peu puis verifier + placer les TPs
               setTimeout(async () => {
                 try {
@@ -291,6 +299,7 @@ async function handleMessage(message) {
               }, 10000); // Attendre 10s avant de verifier
             }
           }
+          logger.info(`[SIGNAL] Traitement termine pour ${parsed.pair} #${insertedSignal.id}`);
           // Notifier via le bot
           await reporter.notifyNewSignal(parsed);
         }
