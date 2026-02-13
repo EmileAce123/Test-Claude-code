@@ -45,16 +45,20 @@ if (!DASH_PASSWORD) {
 database.init(DB_PATH);
 logger.info(`Dashboard : base de données ouverte (${DB_PATH})`);
 
-// ---- Configurer le portefeuille virtuel ----
-portfolio.configure({
-  startCapital: parseFloat(process.env.VIRTUAL_PORTFOLIO_START || '200'),
-  maxPositionPct: parseFloat(process.env.MAX_POSITION_SIZE_PERCENT || '10'),
-  tradingFeePct: parseFloat(process.env.TRADING_FEE_PERCENT || '0.5'),
-});
-logger.info('Dashboard : portefeuille virtuel configure');
-
 // ---- Initialiser le trading engine (pour positions, balance, kill switch) ----
 tradingEngine.init();
+
+// ---- Configurer le portefeuille virtuel (simulation uniquement) ----
+if (!tradingEngine.isActive()) {
+  portfolio.configure({
+    startCapital: parseFloat(process.env.VIRTUAL_PORTFOLIO_START || '200'),
+    maxPositionPct: parseFloat(process.env.MAX_POSITION_SIZE_PERCENT || '10'),
+    tradingFeePct: parseFloat(process.env.TRADING_FEE_PERCENT || '0.5'),
+  });
+  logger.info('Dashboard : portefeuille virtuel configure');
+} else {
+  logger.info('Dashboard : mode trading reel - portefeuille virtuel desactive');
+}
 if (tradingEngine.isActive()) {
   tradingEngine.testConnection().then(ok => {
     if (ok) {

@@ -306,11 +306,38 @@ router.get('/health', (req, res) => {
 });
 
 // ---- GET /api/portfolio ----
-// Retourne l'etat actuel du portefeuille virtuel
-router.get('/portfolio', (req, res) => {
+// Retourne l'etat actuel du portefeuille (virtuel ou reel selon le mode)
+router.get('/portfolio', async (req, res) => {
   try {
-    const snap = portfolio.getPortfolioSnapshot();
-    res.json(snap);
+    if (tradingEngine.isActive()) {
+      // Mode trading reel : retourner donnees Binance
+      const info = await tradingEngine.getAccountInfo();
+      const positions = await tradingEngine.syncPositions();
+      res.json({
+        mode: tradingEngine.mode,
+        source: 'binance',
+        current: info.totalBalance,
+        available: info.availableBalance,
+        unrealizedPnl: info.unrealizedPnl,
+        marginBalance: info.marginBalance,
+        openPositions: positions.length,
+        positions: positions.map(p => ({
+          symbol: p.symbol,
+          side: p.side,
+          leverage: p.leverage,
+          entryPrice: p.entryPrice,
+          currentPrice: p.currentPrice,
+          unrealizedPnl: p.unrealizedPnl,
+          liquidationPrice: p.liquidationPrice,
+        })),
+      });
+    } else {
+      // Mode simulation : portefeuille virtuel
+      const snap = portfolio.getPortfolioSnapshot();
+      snap.mode = 'simulation';
+      snap.source = 'virtual';
+      res.json(snap);
+    }
   } catch (err) {
     logger.error(`Erreur API /portfolio : ${err.message}`);
     res.status(500).json({ error: 'Erreur calcul du portefeuille' });
@@ -401,31 +428,57 @@ router.get('/trades/:id/executions', (req, res) => {
 
 // ---- GET /api/portfolio/exposure ----
 // Retourne l'exposition actuelle
-router.get('/portfolio/exposure', (req, res) => {
+router.get('/portfolio/exposure', async (req, res) => {
   try {
-    const activePositions = database.getActivePositions();
-    const exposure = database.getOpenExposure();
-    const snap = portfolio.getPortfolioSnapshot();
+    if (tradingEngine.isActive()) {
+      // Mode trading reel
+      const positions = await tradingEngine.syncPositions();
+      const totalExposure = positions.reduce((sum, p) => sum + (p.quantity * p.entryPrice / p.leverage), 0);
+      const totalPnl = positions.reduce((sum, p) => sum + p.unrealizedPnl, 0);
 
-    res.json({
-      exposure: Math.round(exposure * 100) / 100,
-      activeCount: activePositions.length,
-      capitalBase: snap.current,
-      profitRealized: activePositions.reduce((sum, s) => sum + (s.profit_realized_total || 0), 0),
-      profitLatent: activePositions.reduce((sum, s) => sum + (s.profit_latent || 0), 0),
-      positions: activePositions.map(s => ({
-        id: s.id,
-        pair: s.pair,
-        direction: s.direction,
-        leverage: s.leverage,
-        positionInitial: s.position_size_initial,
-        remainingPercent: s.position_remaining_percent,
-        remainingSize: s.position_remaining_size,
-        profitRealized: s.profit_realized_total,
-        profitLatent: s.profit_latent,
-        pnlTotal: s.pnl_total,
-      })),
-    });
+      res.json({
+        mode: tradingEngine.mode,
+        exposure: Math.round(totalExposure * 100) / 100,
+        activeCount: positions.length,
+        profitLatent: Math.round(totalPnl * 100) / 100,
+        positions: positions.map(p => ({
+          symbol: p.symbol,
+          pair: p.symbol.replace('USDT', '/USDT'),
+          direction: p.side,
+          leverage: p.leverage,
+          entryPrice: p.entryPrice,
+          currentPrice: p.currentPrice,
+          unrealizedPnl: p.unrealizedPnl,
+          liquidationPrice: p.liquidationPrice,
+        })),
+      });
+    } else {
+      // Mode simulation
+      const activePositions = database.getActivePositions();
+      const exposure = database.getOpenExposure();
+      const snap = portfolio.getPortfolioSnapshot();
+
+      res.json({
+        mode: 'simulation',
+        exposure: Math.round(exposure * 100) / 100,
+        activeCount: activePositions.length,
+        capitalBase: snap.current,
+        profitRealized: activePositions.reduce((sum, s) => sum + (s.profit_realized_total || 0), 0),
+        profitLatent: activePositions.reduce((sum, s) => sum + (s.profit_latent || 0), 0),
+        positions: activePositions.map(s => ({
+          id: s.id,
+          pair: s.pair,
+          direction: s.direction,
+          leverage: s.leverage,
+          positionInitial: s.position_size_initial,
+          remainingPercent: s.position_remaining_percent,
+          remainingSize: s.position_remaining_size,
+          profitRealized: s.profit_realized_total,
+          profitLatent: s.profit_latent,
+          pnlTotal: s.pnl_total,
+        })),
+      });
+    }
   } catch (err) {
     logger.error(`Erreur API /portfolio/exposure : ${err.message}`);
     res.status(500).json({ error: 'Erreur calcul exposition' });
@@ -469,22 +522,35 @@ router.post('/trades/:id/close', async (req, res) => {
       return res.status(400).json({ error: 'Prix non disponible (Binance non connecte et pas de prix en cache)' });
     }
 
-    const result = portfolio.executeManualClose(signalId, percentToClose, currentPrice);
+    if (tradingEngine.isActive()) {
+      // Mode trading reel : fermer sur Binance
+      const closeResult = await tradingEngine.closePosition(signal, 'manual');
+      logger.info(`[API] Fermeture manuelle Binance signal #${signalId} ${signal.pair}`);
+      res.json({
+        success: true,
+        mode: tradingEngine.mode,
+        message: `Position ${signal.pair} fermee sur Binance`,
+        closeResult,
+      });
+    } else {
+      // Mode simulation : fermeture virtuelle
+      const result = portfolio.executeManualClose(signalId, percentToClose, currentPrice);
 
-    if (!result) {
-      return res.status(500).json({ error: 'Erreur execution de la fermeture' });
+      if (!result) {
+        return res.status(500).json({ error: 'Erreur execution de la fermeture' });
+      }
+
+      logger.info(`[API] Fermeture manuelle signal #${signalId} ${signal.pair} : ${percentToClose}% → profit=${result.profitNet >= 0 ? '+' : ''}${result.profitNet.toFixed(2)}$`);
+
+      res.json({
+        success: true,
+        profit: result.profitNet,
+        profitPct: result.profitPctSafe,
+        remaining: result.remainingPercent,
+        status: result.status,
+        capitalAfter: result.capitalAfter,
+      });
     }
-
-    logger.info(`[API] Fermeture manuelle signal #${signalId} ${signal.pair} : ${percentToClose}% → profit=${result.profitNet >= 0 ? '+' : ''}${result.profitNet.toFixed(2)}$`);
-
-    res.json({
-      success: true,
-      profit: result.profitNet,
-      profitPct: result.profitPctSafe,
-      remaining: result.remainingPercent,
-      status: result.status,
-      capitalAfter: result.capitalAfter,
-    });
   } catch (err) {
     logger.error(`Erreur API POST /trades/:id/close : ${err.message}`);
     res.status(500).json({ error: 'Erreur fermeture manuelle' });

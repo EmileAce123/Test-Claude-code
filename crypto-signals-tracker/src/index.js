@@ -34,9 +34,13 @@ async function main() {
   logger.info('[1/6] Initialisation de la base de donnees...');
   database.init(config.database.path);
 
-  // ---- Etape 2 : Configurer le portefeuille virtuel ----
-  logger.info('[2/6] Configuration du portefeuille virtuel...');
-  portfolio.configure(config.portfolio);
+  // ---- Etape 2 : Configurer le portefeuille virtuel (simulation uniquement) ----
+  if (!process.env.TRADING_MODE || process.env.TRADING_MODE === 'simulation') {
+    logger.info('[2/6] Configuration du portefeuille virtuel...');
+    portfolio.configure(config.portfolio);
+  } else {
+    logger.info('[2/6] Mode trading reel - portefeuille virtuel desactive');
+  }
 
   // ---- Etape 2b : Initialiser le client Binance (lecture seule) ----
   logger.info('[2b/6] Initialisation du client Binance...');
@@ -248,8 +252,10 @@ async function handleMessage(message) {
         // Nouveau signal de trading
         const insertedSignal = database.insertSignal(parsed);
         if (insertedSignal) {
-          // Initialiser la position pyramidale (simulation)
-          portfolio.initPosition(insertedSignal.id);
+          // Initialiser la position pyramidale (simulation uniquement)
+          if (!tradingEngine.isActive()) {
+            portfolio.initPosition(insertedSignal.id);
+          }
           // Recuperer le prix reel d'entree depuis Binance
           await fetchAndStoreEntryPrice(insertedSignal);
           // Trading reel : ouvrir position sur Binance
@@ -292,19 +298,23 @@ async function handleMessage(message) {
       }
 
       case 'confirmation':
-        // Target atteint - execution pyramidale
+        // Target atteint
         const insertedConfirmation = database.insertConfirmation(parsed);
         if (insertedConfirmation && insertedConfirmation.signalId) {
           // Recuperer le prix reel de sortie depuis Binance et comparer
           await fetchAndStoreExitPrice(insertedConfirmation.signalId, parsed.profitPct);
-          // Executer la fermeture partielle pyramidale
-          const tpResult = portfolio.executePyramidTP(
-            insertedConfirmation.signalId,
-            parsed.targetNumber,
-            parsed.profitPct
-          );
-          if (tpResult) {
-            logger.info(`[TRADE] ${parsed.pair} TP${parsed.targetNumber} : ferme ${tpResult.percentClosed}% | profit=${tpResult.profitNet >= 0 ? '+' : ''}${tpResult.profitNet.toFixed(2)}$ | restant=${tpResult.remainingPercent}%`);
+          // Executer la fermeture partielle pyramidale (simulation uniquement)
+          if (!tradingEngine.isActive()) {
+            const tpResult = portfolio.executePyramidTP(
+              insertedConfirmation.signalId,
+              parsed.targetNumber,
+              parsed.profitPct
+            );
+            if (tpResult) {
+              logger.info(`[TRADE] ${parsed.pair} TP${parsed.targetNumber} : ferme ${tpResult.percentClosed}% | profit=${tpResult.profitNet >= 0 ? '+' : ''}${tpResult.profitNet.toFixed(2)}$ | restant=${tpResult.remainingPercent}%`);
+            }
+          } else {
+            logger.info(`[TRADE] ${parsed.pair} TP${parsed.targetNumber} confirme (Binance gere les TPs)`);
           }
           await reporter.notifyConfirmation(parsed);
         }
@@ -324,14 +334,16 @@ async function handleMessage(message) {
           if (slSignal) {
             // Recuperer le prix reel de sortie depuis Binance
             await fetchAndStoreExitPrice(slSignal.id, parsed.lossPct);
-            // Executer le stop loss pyramidal (ferme 100% restant) - simulation
-            const slResult = portfolio.executePyramidSL(slSignal.id, parsed.lossPct);
-            if (slResult) {
-              logger.info(`[TRADE] ${parsed.pair} SL : ferme ${slResult.percentClosed}% restant | perte=-${slResult.lossNet.toFixed(2)}$ | P&L total=${slResult.pnlTotal.toFixed(2)}$`);
-            }
-            // Trading reel : fermer sur Binance (si pas deja fait par STOP_MARKET)
-            if (tradingEngine.isActive()) {
+            if (!tradingEngine.isActive()) {
+              // Simulation : executer le stop loss pyramidal
+              const slResult = portfolio.executePyramidSL(slSignal.id, parsed.lossPct);
+              if (slResult) {
+                logger.info(`[TRADE] ${parsed.pair} SL : ferme ${slResult.percentClosed}% restant | perte=-${slResult.lossNet.toFixed(2)}$ | P&L total=${slResult.pnlTotal.toFixed(2)}$`);
+              }
+            } else {
+              // Trading reel : fermer sur Binance (si pas deja fait par STOP_MARKET)
               await tradingEngine.closePosition(slSignal, 'stop_loss');
+              logger.info(`[TRADE] ${parsed.pair} SL : fermeture Binance executee`);
             }
           }
         }

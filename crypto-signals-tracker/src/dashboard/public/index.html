@@ -68,48 +68,98 @@
       </div>
     </section>
 
-    <!-- ---- Section Portefeuille Virtuel ---- -->
+    <!-- ---- Section Portefeuille (Virtuel ou Binance) ---- -->
     <section class="portfolio-section" id="portfolioSection">
-      <h2 class="section-title">Portefeuille virtuel</h2>
-      <div class="portfolio-cards">
-        <div class="stat-card">
-          <div class="stat-label">Capital actuel</div>
-          <div class="stat-value" id="portfolioCapital">--</div>
-          <div class="stat-sub" id="portfolioCapitalSub"></div>
+      <h2 class="section-title" id="portfolioTitle">Portefeuille virtuel</h2>
+
+      <!-- Contenu SIMULATION (virtuel) -->
+      <div id="portfolioSimulation">
+        <div class="portfolio-cards">
+          <div class="stat-card">
+            <div class="stat-label">Capital actuel</div>
+            <div class="stat-value" id="portfolioCapital">--</div>
+            <div class="stat-sub" id="portfolioCapitalSub"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">ROI</div>
+            <div class="stat-value" id="portfolioRoi">--</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Gain net</div>
+            <div class="stat-value" id="portfolioGain">--</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Frais cumules</div>
+            <div class="stat-value neutral" id="portfolioFees">--</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Win Rate (portfolio)</div>
+            <div class="stat-value" id="portfolioWinRate">--</div>
+            <div class="stat-sub" id="portfolioWinRateSub"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Pertes consec. max</div>
+            <div class="stat-value neutral" id="portfolioMaxLosses">--</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Exposition</div>
+            <div class="stat-value neutral" id="portfolioExposure">--</div>
+            <div class="stat-sub" id="portfolioExposureSub"></div>
+          </div>
         </div>
-        <div class="stat-card">
-          <div class="stat-label">ROI</div>
-          <div class="stat-value" id="portfolioRoi">--</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Gain net</div>
-          <div class="stat-value" id="portfolioGain">--</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Frais cumules</div>
-          <div class="stat-value neutral" id="portfolioFees">--</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Win Rate (portfolio)</div>
-          <div class="stat-value" id="portfolioWinRate">--</div>
-          <div class="stat-sub" id="portfolioWinRateSub"></div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Pertes consec. max</div>
-          <div class="stat-value neutral" id="portfolioMaxLosses">--</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Exposition</div>
-          <div class="stat-value neutral" id="portfolioExposure">--</div>
-          <div class="stat-sub" id="portfolioExposureSub"></div>
+        <div class="chart-card full-width" style="margin-top: 16px;">
+          <div class="chart-title">Evolution du capital ($)</div>
+          <div class="chart-container">
+            <canvas id="portfolioChart"></canvas>
+          </div>
         </div>
       </div>
 
-      <!-- Graphique evolution du capital -->
-      <div class="chart-card full-width" style="margin-top: 16px;">
-        <div class="chart-title">Evolution du capital ($)</div>
-        <div class="chart-container">
-          <canvas id="portfolioChart"></canvas>
+      <!-- Contenu TRADING REEL (Binance) -->
+      <div id="portfolioBinance" style="display:none">
+        <div class="portfolio-cards">
+          <div class="stat-card">
+            <div class="stat-label">Balance totale</div>
+            <div class="stat-value" id="binanceTotalBalance">--</div>
+            <div class="stat-sub" id="binanceTotalBalanceSub"></div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Disponible</div>
+            <div class="stat-value" id="binanceAvailable">--</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">P&L non realise</div>
+            <div class="stat-value" id="binanceUnrealizedPnl">--</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Marge utilisee</div>
+            <div class="stat-value neutral" id="binanceMargin">--</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Positions ouvertes</div>
+            <div class="stat-value neutral" id="binanceOpenCount">--</div>
+          </div>
+        </div>
+
+        <!-- Tableau positions Binance -->
+        <div class="chart-card full-width" style="margin-top: 16px;">
+          <div class="chart-title">Positions Binance</div>
+          <table class="trades-table">
+            <thead>
+              <tr>
+                <th>Paire</th>
+                <th>Direction</th>
+                <th>Leverage</th>
+                <th>Prix entree</th>
+                <th>Prix actuel</th>
+                <th>P&L</th>
+                <th>Liquidation</th>
+              </tr>
+            </thead>
+            <tbody id="binancePositionsBody">
+              <tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Aucune position ouverte</td></tr>
+            </tbody>
+          </table>
         </div>
       </div>
     </section>

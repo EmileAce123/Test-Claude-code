@@ -208,41 +208,84 @@ async function loadPortfolio() {
     if (response.status === 401) return;
     const data = await response.json();
 
-    const capEl = document.getElementById('portfolioCapital');
-    capEl.textContent = data.current.toFixed(2) + '$';
-    capEl.className = 'stat-value ' + (data.current >= data.initial ? 'positive' : 'negative');
-    document.getElementById('portfolioCapitalSub').textContent =
-      'Initial : ' + data.initial.toFixed(2) + '$';
+    if (data.source === 'binance') {
+      // Mode trading reel : afficher donnees Binance
+      document.getElementById('portfolioTitle').textContent = 'Compte Binance (' + (data.mode || 'trading').toUpperCase() + ')';
+      document.getElementById('portfolioSimulation').style.display = 'none';
+      document.getElementById('portfolioBinance').style.display = 'block';
 
-    const roiEl = document.getElementById('portfolioRoi');
-    roiEl.textContent = (data.roi >= 0 ? '+' : '') + data.roi + '%';
-    roiEl.className = 'stat-value ' + (data.roi >= 0 ? 'positive' : 'negative');
+      document.getElementById('binanceTotalBalance').textContent = data.current.toFixed(2) + ' USDT';
 
-    const gainEl = document.getElementById('portfolioGain');
-    gainEl.textContent = (data.totalGain >= 0 ? '+' : '') + data.totalGain.toFixed(2) + '$';
-    gainEl.className = 'stat-value ' + (data.totalGain >= 0 ? 'positive' : 'negative');
+      document.getElementById('binanceAvailable').textContent = (data.available || 0).toFixed(2) + ' USDT';
 
-    document.getElementById('portfolioFees').textContent = data.totalFees.toFixed(2) + '$';
+      const pnlEl = document.getElementById('binanceUnrealizedPnl');
+      const pnl = data.unrealizedPnl || 0;
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' USDT';
+      pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'positive' : 'negative');
 
-    const wrEl = document.getElementById('portfolioWinRate');
-    wrEl.textContent = data.winRate + '%';
-    wrEl.className = 'stat-value ' + (data.winRate >= 50 ? 'positive' : data.winRate > 0 ? 'negative' : 'neutral');
-    document.getElementById('portfolioWinRateSub').textContent =
-      data.winCount + 'W / ' + data.lossCount + 'L';
+      document.getElementById('binanceMargin').textContent = (data.marginBalance || 0).toFixed(2) + ' USDT';
+      document.getElementById('binanceOpenCount').textContent = (data.openPositions || 0);
 
-    document.getElementById('portfolioMaxLosses').textContent = data.maxConsecutiveLosses;
+      // Tableau positions
+      var tbody = document.getElementById('binancePositionsBody');
+      var positions = data.positions || [];
+      if (positions.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Aucune position ouverte</td></tr>';
+      } else {
+        tbody.innerHTML = positions.map(function(p) {
+          var pnlClass = p.unrealizedPnl >= 0 ? 'positive' : 'negative';
+          var dirClass = p.side === 'LONG' ? 'positive' : 'negative';
+          return '<tr>' +
+            '<td><strong>' + p.symbol + '</strong></td>' +
+            '<td class="' + dirClass + '">' + p.side + '</td>' +
+            '<td>X' + p.leverage + '</td>' +
+            '<td>' + formatPrice(p.entryPrice) + '</td>' +
+            '<td>' + formatPrice(p.currentPrice) + '</td>' +
+            '<td class="' + pnlClass + '">' + (p.unrealizedPnl >= 0 ? '+' : '') + p.unrealizedPnl.toFixed(2) + '$</td>' +
+            '<td>' + (p.liquidationPrice ? formatPrice(p.liquidationPrice) : '--') + '</td>' +
+            '</tr>';
+        }).join('');
+      }
+    } else {
+      // Mode simulation : portefeuille virtuel
+      document.getElementById('portfolioTitle').textContent = 'Portefeuille virtuel';
+      document.getElementById('portfolioSimulation').style.display = 'block';
+      document.getElementById('portfolioBinance').style.display = 'none';
 
-    // Exposition
-    const exposureEl = document.getElementById('portfolioExposure');
-    const exposure = data.exposure || 0;
-    exposureEl.textContent = exposure.toFixed(2) + '$';
-    const latentTotal = data.latentTotal || 0;
-    const capitalWithLatent = data.current + latentTotal;
-    document.getElementById('portfolioExposureSub').textContent =
-      'Dispo : ' + (data.current - exposure).toFixed(2) + '$' +
-      (latentTotal !== 0 ? ' | Latent : ' + (latentTotal >= 0 ? '+' : '') + latentTotal.toFixed(2) + '$' : '');
+      var capEl = document.getElementById('portfolioCapital');
+      capEl.textContent = data.current.toFixed(2) + '$';
+      capEl.className = 'stat-value ' + (data.current >= data.initial ? 'positive' : 'negative');
+      document.getElementById('portfolioCapitalSub').textContent =
+        'Initial : ' + data.initial.toFixed(2) + '$';
 
-    renderPortfolioChart(data.history);
+      var roiEl = document.getElementById('portfolioRoi');
+      roiEl.textContent = (data.roi >= 0 ? '+' : '') + data.roi + '%';
+      roiEl.className = 'stat-value ' + (data.roi >= 0 ? 'positive' : 'negative');
+
+      var gainEl = document.getElementById('portfolioGain');
+      gainEl.textContent = (data.totalGain >= 0 ? '+' : '') + data.totalGain.toFixed(2) + '$';
+      gainEl.className = 'stat-value ' + (data.totalGain >= 0 ? 'positive' : 'negative');
+
+      document.getElementById('portfolioFees').textContent = data.totalFees.toFixed(2) + '$';
+
+      var wrEl = document.getElementById('portfolioWinRate');
+      wrEl.textContent = data.winRate + '%';
+      wrEl.className = 'stat-value ' + (data.winRate >= 50 ? 'positive' : data.winRate > 0 ? 'negative' : 'neutral');
+      document.getElementById('portfolioWinRateSub').textContent =
+        data.winCount + 'W / ' + data.lossCount + 'L';
+
+      document.getElementById('portfolioMaxLosses').textContent = data.maxConsecutiveLosses;
+
+      var exposureEl = document.getElementById('portfolioExposure');
+      var exposure = data.exposure || 0;
+      exposureEl.textContent = exposure.toFixed(2) + '$';
+      var latentTotal = data.latentTotal || 0;
+      document.getElementById('portfolioExposureSub').textContent =
+        'Dispo : ' + (data.current - exposure).toFixed(2) + '$' +
+        (latentTotal !== 0 ? ' | Latent : ' + (latentTotal >= 0 ? '+' : '') + latentTotal.toFixed(2) + '$' : '');
+
+      renderPortfolioChart(data.history);
+    }
   } catch (err) {
     console.error('Erreur chargement portfolio :', err);
   }
