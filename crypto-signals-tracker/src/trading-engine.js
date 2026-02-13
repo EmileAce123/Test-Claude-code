@@ -39,6 +39,7 @@ class TradingEngine {
     this.killSwitchEnabled = false;
     this.killSwitchActive = false; // true = tout ferme, plus de trades
     this.alertCallback = null; // fonction pour envoyer alertes Telegram
+    this.symbolInfoCache = {}; // cache des infos de symboles Binance
   }
 
   /**
@@ -201,6 +202,55 @@ class TradingEngine {
   }
 
   /**
+   * Recupere les infos d'un symbole Binance Futures (avec cache).
+   * @param {string} symbol - Ex: "BTCUSDT"
+   * @returns {Object} { quantityPrecision, pricePrecision, minQty, maxQty, stepSize, tickSize, maxLeverage }
+   */
+  async getSymbolInfo(symbol) {
+    if (this.symbolInfoCache[symbol]) {
+      logger.debug(`[TRADING] symbolInfo ${symbol} depuis cache`);
+      return this.symbolInfoCache[symbol];
+    }
+
+    const exchangeInfo = await this.client.futuresExchangeInfo();
+    const symbolInfo = exchangeInfo.symbols.find(s => s.symbol === symbol);
+
+    if (!symbolInfo) {
+      throw new Error(`Symbole ${symbol} non trouve sur Binance Futures`);
+    }
+
+    const lotSize = symbolInfo.filters.find(f => f.filterType === 'LOT_SIZE');
+    const priceFilter = symbolInfo.filters.find(f => f.filterType === 'PRICE_FILTER');
+
+    const info = {
+      symbol,
+      quantityPrecision: symbolInfo.quantityPrecision,
+      pricePrecision: symbolInfo.pricePrecision,
+      minQty: parseFloat(lotSize?.minQty || '0'),
+      maxQty: parseFloat(lotSize?.maxQty || '999999'),
+      stepSize: parseFloat(lotSize?.stepSize || '0'),
+      tickSize: parseFloat(priceFilter?.tickSize || '0'),
+    };
+
+    // Cacher pour les appels suivants
+    this.symbolInfoCache[symbol] = info;
+    logger.info(`[TRADING] symbolInfo ${symbol}: qtyPrec=${info.quantityPrecision}, pricePrec=${info.pricePrecision}, minQty=${info.minQty}, stepSize=${info.stepSize}`);
+
+    return info;
+  }
+
+  /**
+   * Arrondit un nombre selon la precision Binance (arrondi vers le bas).
+   * @param {number} value - Valeur brute
+   * @param {number} precision - Nombre de decimales
+   * @returns {number}
+   */
+  roundToPrecision(value, precision) {
+    const multiplier = Math.pow(10, precision);
+    return Math.floor(value * multiplier) / multiplier;
+  }
+
+  /**
    * Valide qu'un trade peut etre execute (securites).
    * @param {Object} signal - Signal parse
    * @param {number} balance - Balance disponible
@@ -296,18 +346,16 @@ class TradingEngine {
 
       const positionSize = balance * (this.maxPositionPercent / 100);
       const symbol = signal.pair.replace('/', '');
-      const leverage = signal.leverage || 10;
+      let leverage = signal.leverage || 10;
 
-      // 3. Prix d'entree = milieu de zone
+      // 3. Recuperer les infos du symbole (precision, leverage max, etc.)
+      logger.info(`[TRADING] Etape 3: Recuperation des infos symbole ${symbol}...`);
+      const symbolInfo = await this.getSymbolInfo(symbol);
+
+      // 4. Prix d'entree = milieu de zone
       const entryPrice = (signal.entryPriceMin + signal.entryPriceMax) / 2;
 
-      // 4. Quantite selon leverage
-      const notional = positionSize * leverage;
-      const quantity = notional / entryPrice;
-
-      logger.info(`[TRADING] Etape 3-4: Calcul position -> taille=${positionSize.toFixed(2)}$, entry=${entryPrice}, qty=${quantity}, notional=${notional.toFixed(2)}$`);
-
-      // 5. Definir le leverage sur Binance
+      // 5. Definir le leverage sur Binance (avec auto-ajustement)
       logger.info(`[TRADING] Etape 5: Configuration leverage ${leverage}x sur ${symbol}...`);
       try {
         await this.client.futuresLeverage({
@@ -316,42 +364,85 @@ class TradingEngine {
         });
         logger.info(`[TRADING] Leverage ${symbol} = ${leverage}x`);
       } catch (err) {
-        logger.warn(`[TRADING] Erreur leverage ${symbol}: ${err.message}`);
+        // Si le leverage demande n'est pas supporte, essayer des valeurs plus basses
+        logger.warn(`[TRADING] Leverage ${leverage}x refuse pour ${symbol}: ${err.message}`);
+        const fallbackLeverages = [20, 10, 5, 3, 2, 1];
+        let leverageSet = false;
+        for (const fallback of fallbackLeverages) {
+          if (fallback >= leverage) continue; // Skip ceux >= au leverage refuse
+          try {
+            await this.client.futuresLeverage({ symbol, leverage: fallback });
+            leverage = fallback;
+            logger.info(`[TRADING] Leverage ajuste a ${leverage}x pour ${symbol}`);
+            leverageSet = true;
+            break;
+          } catch (e) {
+            logger.debug(`[TRADING] Leverage ${fallback}x aussi refuse pour ${symbol}`);
+          }
+        }
+        if (!leverageSet) {
+          logger.error(`[TRADING] Impossible de configurer le leverage pour ${symbol}`);
+          throw new Error(`Aucun leverage valide pour ${symbol}`);
+        }
       }
 
-      // 6. Passer l'ordre LIMIT
-      logger.info(`[TRADING] Etape 6: Passage de l'ordre LIMIT...`);
-      const side = signal.direction === 'LONG' ? 'BUY' : 'SELL';
+      // 6. Calculer quantite avec la bonne precision
+      const notional = positionSize * leverage;
+      let quantity = notional / entryPrice;
 
-      // Formater quantite et prix selon les regles Binance
-      const formattedQty = this.formatQuantity(quantity, symbol);
-      const formattedPrice = this.formatPrice(entryPrice, symbol);
+      // Arrondir selon stepSize si disponible
+      if (symbolInfo.stepSize > 0) {
+        quantity = Math.floor(quantity / symbolInfo.stepSize) * symbolInfo.stepSize;
+      }
+      // Arrondir selon la precision
+      quantity = this.roundToPrecision(quantity, symbolInfo.quantityPrecision);
+      const roundedPrice = this.roundToPrecision(entryPrice, symbolInfo.pricePrecision);
+
+      logger.info(`[TRADING] Etape 6: Calcul -> position=${positionSize.toFixed(2)}$, leverage=${leverage}x, notional=${notional.toFixed(2)}$`);
+      logger.info(`[TRADING]   Prix: brut=${entryPrice} -> arrondi=${roundedPrice} (precision=${symbolInfo.pricePrecision})`);
+      logger.info(`[TRADING]   Quantite: brute=${notional / entryPrice} -> arrondie=${quantity} (precision=${symbolInfo.quantityPrecision}, stepSize=${symbolInfo.stepSize})`);
+
+      // Verifier min/max qty
+      if (quantity < symbolInfo.minQty) {
+        throw new Error(`Quantite ${quantity} < minimum ${symbolInfo.minQty} pour ${symbol}`);
+      }
+      if (quantity > symbolInfo.maxQty) {
+        throw new Error(`Quantite ${quantity} > maximum ${symbolInfo.maxQty} pour ${symbol}`);
+      }
+      if (quantity <= 0) {
+        throw new Error(`Quantite calculee = 0 pour ${symbol} (position trop petite)`);
+      }
+
+      // 7. Passer l'ordre LIMIT
+      logger.info(`[TRADING] Etape 7: Passage de l'ordre LIMIT...`);
+      const side = signal.direction === 'LONG' ? 'BUY' : 'SELL';
 
       const order = await this.client.futuresOrder({
         symbol,
         side,
         type: 'LIMIT',
-        quantity: formattedQty,
-        price: formattedPrice,
+        quantity: quantity.toString(),
+        price: roundedPrice.toString(),
         timeInForce: 'GTC',
       });
 
       logger.info(`[TRADING] ORDRE OUVERT: ${symbol} ${side} X${leverage}`);
-      logger.info(`[TRADING]   Quantite: ${formattedQty} | Prix: ${formattedPrice}`);
+      logger.info(`[TRADING]   Quantite: ${quantity} | Prix: ${roundedPrice}`);
       logger.info(`[TRADING]   Order ID: ${order.orderId}`);
       logger.info(`[TRADING]   Position: ${positionSize.toFixed(2)}$ (${this.maxPositionPercent}% de ${balance.toFixed(2)}$)`);
 
-      // 7. Stocker l'order ID en BDD
+      // 8. Stocker l'order ID en BDD
       database.updateSignalBinanceOrder(signalId, {
         binanceOrderId: order.orderId.toString(),
         entryPriceReal: entryPrice,
       });
 
-      // 8. Alerte Telegram
+      // 9. Alerte Telegram
       await this.sendAlert(
         `ORDRE OUVERT\n` +
         `${signal.pair} ${signal.direction} X${leverage}\n` +
-        `Entree: ${formattedPrice}$\n` +
+        `Entree: ${roundedPrice}$\n` +
+        `Quantite: ${quantity}\n` +
         `Position: ${positionSize.toFixed(2)}$ (${this.maxPositionPercent}% capital)\n` +
         `Balance restante: ${(balance - positionSize).toFixed(2)}$\n` +
         `Mode: ${this.mode.toUpperCase()}`
@@ -384,6 +475,9 @@ class TradingEngine {
         ? JSON.parse(signal.targets)
         : signal.targets;
 
+      // Recuperer les infos du symbole pour la precision
+      const symbolInfo = await this.getSymbolInfo(symbol);
+
       // Recuperer la position ouverte
       const positions = await this.client.futuresPositionRisk({ symbol });
       const pos = positions.find(p => p.symbol === symbol);
@@ -401,24 +495,33 @@ class TradingEngine {
         const targetNum = i + 1;
         const targetPrice = targets[i];
         const percentToClose = PYRAMID_CONFIG[targetNum] || 15;
-        const qtyToClose = posQty * (percentToClose / 100);
+        let qtyToClose = posQty * (percentToClose / 100);
 
-        const formattedQty = this.formatQuantity(qtyToClose, symbol);
-        const formattedPrice = this.formatPrice(targetPrice, symbol);
+        // Arrondir selon stepSize et precision
+        if (symbolInfo.stepSize > 0) {
+          qtyToClose = Math.floor(qtyToClose / symbolInfo.stepSize) * symbolInfo.stepSize;
+        }
+        qtyToClose = this.roundToPrecision(qtyToClose, symbolInfo.quantityPrecision);
+        const roundedPrice = this.roundToPrecision(targetPrice, symbolInfo.pricePrecision);
+
+        if (qtyToClose < symbolInfo.minQty) {
+          logger.warn(`[TRADING] TP${targetNum} quantite ${qtyToClose} < min ${symbolInfo.minQty}, skip`);
+          continue;
+        }
 
         try {
           const tpOrder = await this.client.futuresOrder({
             symbol,
             side: tpSide,
             type: 'LIMIT',
-            quantity: formattedQty,
-            price: formattedPrice,
+            quantity: qtyToClose.toString(),
+            price: roundedPrice.toString(),
             timeInForce: 'GTC',
             reduceOnly: 'true',
           });
 
           tpOrders.push(tpOrder);
-          logger.info(`[TRADING] TP${targetNum} place: ${percentToClose}% (${formattedQty}) a ${formattedPrice}`);
+          logger.info(`[TRADING] TP${targetNum} place: ${percentToClose}% (${qtyToClose}) a ${roundedPrice}`);
         } catch (err) {
           logger.error(`[TRADING] Erreur TP${targetNum} ${symbol}: ${err.message}`);
         }
@@ -430,17 +533,17 @@ class TradingEngine {
       if (signal.stopLoss && signal.stopLoss > 0) {
         try {
           const slSide = signal.direction === 'LONG' ? 'SELL' : 'BUY';
-          const formattedSLPrice = this.formatPrice(signal.stopLoss, symbol);
+          const roundedSLPrice = this.roundToPrecision(signal.stopLoss, symbolInfo.pricePrecision);
 
           await this.client.futuresOrder({
             symbol,
             side: slSide,
             type: 'STOP_MARKET',
-            stopPrice: formattedSLPrice,
+            stopPrice: roundedSLPrice.toString(),
             closePosition: 'true',
           });
 
-          logger.info(`[TRADING] Stop Loss place a ${formattedSLPrice}`);
+          logger.info(`[TRADING] Stop Loss place a ${roundedSLPrice}`);
         } catch (err) {
           logger.error(`[TRADING] Erreur SL ${symbol}: ${err.message}`);
         }
@@ -461,18 +564,19 @@ class TradingEngine {
     if (!this.initialized || !this.client) return;
 
     try {
+      const symbolInfo = await this.getSymbolInfo(symbol);
       const slSide = direction === 'LONG' ? 'SELL' : 'BUY';
-      const formattedPrice = this.formatPrice(stopPrice, symbol);
+      const roundedPrice = this.roundToPrecision(stopPrice, symbolInfo.pricePrecision);
 
       await this.client.futuresOrder({
         symbol,
         side: slSide,
         type: 'STOP_MARKET',
-        stopPrice: formattedPrice,
+        stopPrice: roundedPrice.toString(),
         closePosition: 'true',
       });
 
-      logger.info(`[TRADING] SL place sur ${symbol}: ${formattedPrice}`);
+      logger.info(`[TRADING] SL place sur ${symbol}: ${roundedPrice}`);
     } catch (err) {
       logger.error(`[TRADING] Erreur SL ${symbol}: ${err.message}`);
     }
@@ -508,14 +612,19 @@ class TradingEngine {
         return null;
       }
 
+      const symbolInfo = await this.getSymbolInfo(symbol);
       const closeSide = signal.direction === 'LONG' ? 'SELL' : 'BUY';
-      const formattedQty = this.formatQuantity(posQty, symbol);
+      let closeQty = posQty;
+      if (symbolInfo.stepSize > 0) {
+        closeQty = Math.floor(closeQty / symbolInfo.stepSize) * symbolInfo.stepSize;
+      }
+      closeQty = this.roundToPrecision(closeQty, symbolInfo.quantityPrecision);
 
       const closeOrder = await this.client.futuresOrder({
         symbol,
         side: closeSide,
         type: 'MARKET',
-        quantity: formattedQty,
+        quantity: closeQty.toString(),
         reduceOnly: 'true',
       });
 
@@ -525,7 +634,7 @@ class TradingEngine {
         : reason === 'kill_switch' ? 'KILL SWITCH'
         : 'FERMETURE MANUELLE';
 
-      logger.info(`[TRADING] ${reasonText}: ${symbol} ferme (qty=${formattedQty})`);
+      logger.info(`[TRADING] ${reasonText}: ${symbol} ferme (qty=${closeQty})`);
       logger.info(`[TRADING]   P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$`);
 
       await this.sendAlert(
@@ -602,13 +711,23 @@ class TradingEngine {
 
           // Fermer la position en MARKET
           const closeSide = pos.side === 'LONG' ? 'SELL' : 'BUY';
-          const formattedQty = this.formatQuantity(pos.quantity, pos.symbol);
+          let closeQty = pos.quantity;
+          try {
+            const symInfo = await this.getSymbolInfo(pos.symbol);
+            if (symInfo.stepSize > 0) {
+              closeQty = Math.floor(closeQty / symInfo.stepSize) * symInfo.stepSize;
+            }
+            closeQty = this.roundToPrecision(closeQty, symInfo.quantityPrecision);
+          } catch (e) {
+            // Fallback: garder la quantite brute
+            logger.warn(`[TRADING] KILL: Impossible de recuperer precision ${pos.symbol}, utilisation quantite brute`);
+          }
 
           await this.client.futuresOrder({
             symbol: pos.symbol,
             side: closeSide,
             type: 'MARKET',
-            quantity: formattedQty,
+            quantity: closeQty.toString(),
             reduceOnly: 'true',
           });
 
@@ -652,37 +771,8 @@ class TradingEngine {
     }
   }
 
-  /**
-   * Formate une quantite selon les regles de precision Binance.
-   * @param {number} qty - Quantite brute
-   * @param {string} symbol - Symbole (pour adapter la precision)
-   * @returns {string} Quantite formatee
-   */
-  formatQuantity(qty, symbol) {
-    // Pour la plupart des paires Futures, 3 decimales suffisent
-    // Les paires BTC ont besoin de plus de precision
-    if (symbol.startsWith('BTC')) {
-      return qty.toFixed(3);
-    }
-    if (qty >= 1) {
-      return qty.toFixed(1);
-    }
-    return qty.toFixed(0) === '0' ? qty.toPrecision(3) : qty.toFixed(2);
-  }
-
-  /**
-   * Formate un prix selon les regles de precision Binance.
-   * @param {number} price - Prix brut
-   * @param {string} symbol - Symbole
-   * @returns {string} Prix formate
-   */
-  formatPrice(price, symbol) {
-    if (price >= 10000) return price.toFixed(1);
-    if (price >= 100) return price.toFixed(2);
-    if (price >= 1) return price.toFixed(4);
-    if (price >= 0.01) return price.toFixed(6);
-    return price.toFixed(8);
-  }
+  // formatQuantity et formatPrice ont ete remplaces par getSymbolInfo() + roundToPrecision()
+  // qui utilisent les donnees reelles de precision depuis Binance API
 
   /**
    * Retourne l'etat actuel du trading engine.
