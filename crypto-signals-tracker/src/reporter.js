@@ -8,9 +8,7 @@
 // C'est un bot classique créé via @BotFather.
 //
 // Rapports automatiques :
-// - Portfolio à 21h59 : etat du portefeuille virtuel
-// - Quotidien à 23h00 : résumé du jour
-// - Hebdomadaire dimanche 23h00 : stats complètes
+// - Quotidien à 20h00 : P&L journee, stats, meilleur/pire trade
 // - Sur demande : commande /stats, /portfolio
 // ============================================================
 
@@ -18,6 +16,7 @@ const { Bot } = require('grammy');
 const cron = require('node-cron');
 const stats = require('./stats-calculator');
 const portfolio = require('./portfolio-simulator');
+const database = require('./database');
 const logger = require('./logger');
 
 // Variable qui stocke l'instance du bot
@@ -212,10 +211,8 @@ async function init(config) {
       '/open - Liste des trades en cours\n' +
       '/diagnostic - Etat du systeme et diagnostic\n' +
       '/help - Ce message d\'aide\n\n' +
-      'Les rapports automatiques sont envoyés :\n' +
-      '• Chaque jour à 21h59 (portfolio)\n' +
-      '• Chaque jour à 23h00 (résumé)\n' +
-      '• Chaque dimanche à 23h00',
+      'Rapports automatiques :\n' +
+      '• Chaque jour a 20h00 (P&L + stats)',
       { parse_mode: 'Markdown' }
     );
   });
@@ -227,67 +224,117 @@ async function init(config) {
 
 /**
  * Programme les rapports automatiques avec cron.
- * @param {Object} reportConfig - Configuration { dailyTime, weeklyDay, weeklyTime, portfolioTime }
+ * @param {Object} reportConfig - Configuration (legacy, ignore)
+ * @param {Object} [tradingEngine] - Instance du trading engine pour le P&L
  */
-function scheduleReports(reportConfig) {
-  const [dailyHour, dailyMinute] = reportConfig.dailyTime.split(':');
-  const [weeklyHour, weeklyMinute] = reportConfig.weeklyTime.split(':');
-  const [portfolioHour, portfolioMinute] = (reportConfig.portfolioTime || '21:59').split(':');
-
-  // ---- Rapport portfolio à 21:59 ----
-  // Etat du portefeuille virtuel chaque jour
-  cron.schedule(`${portfolioMinute} ${portfolioHour} * * *`, async () => {
-    logger.info('Envoi du rapport portfolio automatique...');
-    try {
-      const snap = portfolio.getPortfolioSnapshot();
-      const message = formatPortfolioReport(snap);
-      await sendReport(message);
-
-      // Envoyer les alertes si necessaire
-      const alerts = portfolio.checkAlerts();
-      for (const alert of alerts) {
-        await sendReport(alert);
-      }
-    } catch (err) {
-      logger.error(`Erreur rapport portfolio : ${err.message}`);
-    }
-  });
-  logger.info(`Rapport portfolio programmé à ${reportConfig.portfolioTime || '21:59'}`);
-
-  // ---- Rapport quotidien ----
-  // Planifié chaque jour à l'heure configurée
-  cron.schedule(`${dailyMinute} ${dailyHour} * * *`, async () => {
+function scheduleReports(reportConfig, tradingEngine) {
+  // Rapport quotidien a 20h00
+  cron.schedule('0 20 * * *', async () => {
     logger.info('Envoi du rapport quotidien automatique...');
     try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const periodStats = stats.calculateStatsSince(today.toISOString());
-      const snap = portfolio.getPortfolioSnapshot();
-      const message = formatDailyReport(periodStats, snap);
+      const message = await buildDailyReport(tradingEngine);
       await sendReport(message);
     } catch (err) {
       logger.error(`Erreur rapport quotidien : ${err.message}`);
     }
   });
-  logger.info(`Rapport quotidien programmé à ${reportConfig.dailyTime}`);
+  logger.info('Rapport quotidien programme a 20:00');
+}
 
-  // ---- Rapport hebdomadaire ----
-  // Planifié le jour configuré (0=dimanche) à l'heure configurée
-  cron.schedule(`${weeklyMinute} ${weeklyHour} * * ${reportConfig.weeklyDay}`, async () => {
-    logger.info('Envoi du rapport hebdomadaire automatique...');
+/**
+ * Sauvegarde le snapshot quotidien et calcule le P&L vs hier.
+ * @param {Object} tradingEngine - Instance du trading engine
+ * @returns {Object} { balance, pnlVsYesterday, yesterdayBalance }
+ */
+async function saveDailySnapshotFromBinance(tradingEngine) {
+  const today = new Date().toISOString().split('T')[0];
+  let balance = 0;
+
+  if (tradingEngine && tradingEngine.isActive()) {
     try {
-      const weekAgo = new Date();
-      weekAgo.setDate(weekAgo.getDate() - 7);
-      const periodStats = stats.calculateStatsSince(weekAgo.toISOString());
-      const globalStats = stats.calculateGlobalStats();
-      const snap = portfolio.getPortfolioSnapshot();
-      const message = formatWeeklyReport(periodStats, globalStats, snap);
-      await sendReport(message);
+      balance = await tradingEngine.getAccountBalance();
     } catch (err) {
-      logger.error(`Erreur rapport hebdomadaire : ${err.message}`);
+      logger.error(`Erreur balance pour snapshot: ${err.message}`);
     }
+  }
+
+  // Recuperer balance d'hier
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayDate = yesterday.toISOString().split('T')[0];
+  const yesterdaySnapshot = database.getDailySnapshot(yesterdayDate);
+
+  const pnlVsYesterday = yesterdaySnapshot
+    ? balance - yesterdaySnapshot.balance
+    : 0;
+
+  // Sauvegarder snapshot
+  database.saveDailySnapshot(today, balance, pnlVsYesterday);
+
+  return {
+    balance,
+    pnlVsYesterday,
+    yesterdayBalance: yesterdaySnapshot ? yesterdaySnapshot.balance : null,
+  };
+}
+
+/**
+ * Construit le message du rapport quotidien avec P&L.
+ * @param {Object} tradingEngine - Instance du trading engine
+ * @returns {string} Message formate
+ */
+async function buildDailyReport(tradingEngine) {
+  const today = new Date().toISOString().split('T')[0];
+  const dateStr = new Date().toLocaleDateString('fr-FR', {
+    weekday: 'long', day: 'numeric', month: 'long',
   });
-  logger.info(`Rapport hebdomadaire programmé : jour ${reportConfig.weeklyDay} à ${reportConfig.weeklyTime}`);
+
+  // Sauvegarder snapshot
+  const snapshot = await saveDailySnapshotFromBinance(tradingEngine);
+
+  // Stats du jour
+  const dayStats = database.getDaySignalStats(today);
+  const bestTrade = database.getBestTradeOfDay(today);
+  const worstTrade = database.getWorstTradeOfDay(today);
+
+  let msg = `RAPPORT QUOTIDIEN ${dateStr}\n\n`;
+
+  // P&L
+  const pnlSign = snapshot.pnlVsYesterday >= 0 ? '+' : '';
+  msg += `P&L de la journee: ${pnlSign}${snapshot.pnlVsYesterday.toFixed(2)}$\n`;
+  msg += `  Hier: ${snapshot.yesterdayBalance ? snapshot.yesterdayBalance.toFixed(2) : 'N/A'}$\n`;
+  msg += `  Aujourd'hui: ${snapshot.balance.toFixed(2)}$\n\n`;
+
+  // Trades
+  msg += `Trades de la journee: ${dayStats.total_trades}\n`;
+  msg += `  Fermes: ${dayStats.closed_trades}\n`;
+  msg += `  En cours: ${dayStats.open_trades}\n`;
+
+  // Meilleur trade
+  if (bestTrade && bestTrade.pnl_total != null) {
+    msg += `\nMeilleur trade: ${bestTrade.pair} ${bestTrade.direction}\n`;
+    msg += `  Profit: +${bestTrade.pnl_total.toFixed(2)}$`;
+  }
+
+  // Pire trade
+  if (worstTrade && worstTrade.pnl_total != null) {
+    const icon = worstTrade.status === 'liquidated' ? 'LIQUIDE' : 'Perte';
+    msg += `\n\nPire trade: ${worstTrade.pair} ${worstTrade.direction}\n`;
+    msg += `  ${icon}: ${worstTrade.pnl_total.toFixed(2)}$`;
+  }
+
+  // Stats supplementaires
+  if (dayStats.stop_loss_count > 0 || dayStats.liquidations > 0) {
+    msg += '\n';
+    if (dayStats.stop_loss_count > 0) {
+      msg += `\nStop Loss: ${dayStats.stop_loss_count}`;
+    }
+    if (dayStats.liquidations > 0) {
+      msg += `\nLiquidations: ${dayStats.liquidations}`;
+    }
+  }
+
+  return msg;
 }
 
 /**

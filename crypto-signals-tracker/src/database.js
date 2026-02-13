@@ -177,6 +177,17 @@ function createTables() {
     )
   `);
 
+  // ---- Table des snapshots quotidiens (P&L) ----
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS daily_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL UNIQUE,
+      balance REAL NOT NULL,
+      pnl_vs_yesterday REAL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   logger.info('Tables de la base de données vérifiées/créées');
 }
 
@@ -890,6 +901,76 @@ function getGroups() {
 }
 
 /**
+ * Sauvegarde un snapshot quotidien de la balance.
+ * @param {string} date - Date au format YYYY-MM-DD
+ * @param {number} balance - Balance actuelle
+ * @param {number} pnlVsYesterday - P&L par rapport a hier
+ */
+function saveDailySnapshot(date, balance, pnlVsYesterday) {
+  db.prepare(
+    `INSERT OR REPLACE INTO daily_snapshots (date, balance, pnl_vs_yesterday) VALUES (?, ?, ?)`
+  ).run(date, balance, pnlVsYesterday);
+}
+
+/**
+ * Recupere le snapshot d'une date donnee.
+ * @param {string} date - Date au format YYYY-MM-DD
+ * @returns {Object|null}
+ */
+function getDailySnapshot(date) {
+  return db.prepare(`SELECT * FROM daily_snapshots WHERE date = ?`).get(date) || null;
+}
+
+/**
+ * Recupere les stats des signaux pour une date donnee.
+ * @param {string} date - Date au format YYYY-MM-DD
+ * @returns {Object}
+ */
+function getDaySignalStats(date) {
+  const row = db.prepare(`
+    SELECT
+      COUNT(*) as total_trades,
+      COUNT(CASE WHEN status IN ('closed', 'manual_close') THEN 1 END) as closed_trades,
+      COUNT(CASE WHEN status IN ('open', 'partial', 'active', 'order_placed') THEN 1 END) as open_trades,
+      COALESCE(SUM(CASE WHEN status = 'stopped' THEN 1 ELSE 0 END), 0) as stop_loss_count,
+      COALESCE(SUM(CASE WHEN status = 'liquidated' THEN 1 ELSE 0 END), 0) as liquidations
+    FROM signals
+    WHERE date(created_at) = ?
+  `).get(date);
+  return row || { total_trades: 0, closed_trades: 0, open_trades: 0, stop_loss_count: 0, liquidations: 0 };
+}
+
+/**
+ * Recupere le meilleur trade d'une date donnee.
+ * @param {string} date - Date au format YYYY-MM-DD
+ * @returns {Object|null}
+ */
+function getBestTradeOfDay(date) {
+  return db.prepare(`
+    SELECT pair, direction, net_profit_loss as pnl_total
+    FROM signals
+    WHERE date(created_at) = ? AND net_profit_loss IS NOT NULL
+    ORDER BY net_profit_loss DESC
+    LIMIT 1
+  `).get(date) || null;
+}
+
+/**
+ * Recupere le pire trade d'une date donnee.
+ * @param {string} date - Date au format YYYY-MM-DD
+ * @returns {Object|null}
+ */
+function getWorstTradeOfDay(date) {
+  return db.prepare(`
+    SELECT pair, direction, net_profit_loss as pnl_total, status
+    FROM signals
+    WHERE date(created_at) = ? AND net_profit_loss IS NOT NULL
+    ORDER BY net_profit_loss ASC
+    LIMIT 1
+  `).get(date) || null;
+}
+
+/**
  * Ferme proprement la connexion à la base de données.
  */
 function close() {
@@ -936,4 +1017,10 @@ module.exports = {
   countTodayTrades,
   getTodayPnl,
   findOpenSignal,
+  // Daily snapshots
+  saveDailySnapshot,
+  getDailySnapshot,
+  getDaySignalStats,
+  getBestTradeOfDay,
+  getWorstTradeOfDay,
 };

@@ -8,7 +8,7 @@
 // LIVE    : Trading reel avec argent reel
 //
 // Securites :
-// - Max trades/jour configurable
+// - Max positions simultanees configurable
 // - Perte max quotidienne → arret auto
 // - Kill switch (ferme tout d'urgence)
 // - Validation avant chaque trade
@@ -34,7 +34,7 @@ class TradingEngine {
     this.enabled = false;
     this.initialized = false;
     this.maxPositionPercent = 5;
-    this.maxDailyTrades = 20;
+    this.maxOpenPositions = 20;
     this.maxDailyLossPercent = 10;
     this.killSwitchEnabled = false;
     this.killSwitchActive = false; // true = tout ferme, plus de trades
@@ -50,7 +50,7 @@ class TradingEngine {
     this.mode = process.env.TRADING_MODE || 'simulation';
     this.enabled = process.env.ENABLE_AUTO_TRADING === 'true';
     this.maxPositionPercent = parseFloat(process.env.MAX_POSITION_PERCENT || '5');
-    this.maxDailyTrades = parseInt(process.env.MAX_DAILY_TRADES || '20', 10);
+    this.maxOpenPositions = parseInt(process.env.MAX_OPEN_POSITIONS || '20', 10);
     this.maxDailyLossPercent = parseFloat(process.env.MAX_DAILY_LOSS_PERCENT || '10');
     this.killSwitchEnabled = process.env.ENABLE_KILL_SWITCH === 'true';
 
@@ -78,7 +78,7 @@ class TradingEngine {
       logger.info('[TRADING] Mode TESTNET active');
       logger.info(`[TRADING] Auto-trading: ${this.enabled ? 'ACTIVE' : 'DESACTIVE'}`);
       logger.info(`[TRADING] Max position: ${this.maxPositionPercent}% du capital`);
-      logger.info(`[TRADING] Max trades/jour: ${this.maxDailyTrades}`);
+      logger.info(`[TRADING] Max positions simultanees: ${this.maxOpenPositions}`);
       logger.info(`[TRADING] Perte max/jour: ${this.maxDailyLossPercent}%`);
       logger.info(`[TRADING] Kill switch: ${this.killSwitchEnabled ? 'ACTIVE' : 'DESACTIVE'}`);
       logger.info('='.repeat(50));
@@ -290,12 +290,16 @@ class TradingEngine {
     }
     logger.debug(`[TRADING]   Balance: position=${positionSize.toFixed(2)}$ (${this.maxPositionPercent}% de ${balance.toFixed(2)}$) -> ${positionSize >= 5 ? 'OK' : 'INSUFFISANT'}`);
 
-    // Nombre de trades quotidiens
-    const todayCount = database.countTodayTrades();
-    if (todayCount >= this.maxDailyTrades) {
-      reasons.push(`Limite quotidienne atteinte (${todayCount}/${this.maxDailyTrades})`);
+    // Max positions simultanees (via Binance, pas la BDD)
+    try {
+      const openPositions = await this.syncPositions();
+      if (openPositions.length >= this.maxOpenPositions) {
+        reasons.push(`Max positions simultanees atteinte (${openPositions.length}/${this.maxOpenPositions})`);
+      }
+      logger.debug(`[TRADING]   Positions ouvertes: ${openPositions.length}/${this.maxOpenPositions} -> ${openPositions.length < this.maxOpenPositions ? 'OK' : 'LIMITE'}`);
+    } catch (err) {
+      logger.warn(`[TRADING]   Impossible de verifier positions ouvertes: ${err.message}`);
     }
-    logger.debug(`[TRADING]   Trades aujourd'hui: ${todayCount}/${this.maxDailyTrades} -> ${todayCount < this.maxDailyTrades ? 'OK' : 'LIMITE'}`);
 
     // Perte quotidienne max
     const todayPnl = database.getTodayPnl();
@@ -456,13 +460,11 @@ class TradingEngine {
 
       // 9. Alerte Telegram
       await this.sendAlert(
-        `ORDRE OUVERT\n` +
+        `POSITION OUVERTE\n` +
         `${signal.pair} ${signal.direction} X${leverage}\n` +
-        `Entree: ${roundedPrice}$\n` +
-        `Quantite: ${quantity}\n` +
-        `Position: ${positionSize.toFixed(2)}$ (${this.maxPositionPercent}% capital)\n` +
-        `Balance restante: ${(balance - positionSize).toFixed(2)}$\n` +
-        `Mode: ${this.mode.toUpperCase()}`
+        `Prix entree: ${roundedPrice}$\n` +
+        `Taille: ${positionSize.toFixed(2)}$\n` +
+        `Order ID: ${order.orderId}`
       );
 
       return order;
@@ -656,11 +658,15 @@ class TradingEngine {
       logger.info(`[TRADING] ${reasonText}: ${symbol} ferme (qty=${closeQty})`);
       logger.info(`[TRADING]   P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$`);
 
+      const pnlSign = pnl >= 0 ? '+' : '';
+      const emoji = reason === 'stop_loss' ? 'STOP LOSS'
+        : reason === 'kill_switch' ? 'KILL SWITCH'
+        : 'FERMETURE MANUELLE';
       await this.sendAlert(
-        `${reasonText}\n` +
+        `${emoji}\n` +
         `${signal.pair} ${signal.direction} X${signal.leverage}\n` +
         `100% ferme\n` +
-        `P&L: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$`
+        `${pnl >= 0 ? 'Profit' : 'Perte'}: ${pnlSign}${pnl.toFixed(2)}$`
       );
 
       return closeOrder;
@@ -805,7 +811,7 @@ class TradingEngine {
       killSwitchActive: this.killSwitchActive,
       killSwitchEnabled: this.killSwitchEnabled,
       maxPositionPercent: this.maxPositionPercent,
-      maxDailyTrades: this.maxDailyTrades,
+      maxOpenPositions: this.maxOpenPositions,
       maxDailyLossPercent: this.maxDailyLossPercent,
     };
   }

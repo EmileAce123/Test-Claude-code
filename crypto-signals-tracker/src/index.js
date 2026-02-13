@@ -105,7 +105,7 @@ async function main() {
   // ---- Etape 5 : Demarrer le bot de rapports ----
   logger.info('[5/6] Demarrage du bot de rapports...');
   await reporter.init(config.bot);
-  reporter.scheduleReports(config.reports);
+  reporter.scheduleReports(config.reports, tradingEngine);
 
   // Connecter le trading engine aux alertes Telegram
   if (tradingEngine.isActive()) {
