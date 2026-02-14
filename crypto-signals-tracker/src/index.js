@@ -22,7 +22,11 @@ const reporter = require('./reporter');
 const portfolio = require('./portfolio-simulator');
 const binanceClient = require('./binance-client');
 const tradingEngine = require('./trading-engine');
+const TrailingStopManager = require('./trailing-stop-manager');
 const logger = require('./logger');
+
+// Instance du trailing stop manager (demarre apres trading engine)
+let trailingStopManager = null;
 
 /**
  * Fonction principale - Demarre toute l'application.
@@ -112,6 +116,11 @@ async function main() {
     tradingEngine.setAlertCallback(async (msg) => {
       await reporter.sendReport(msg);
     });
+
+    // Demarrer le trailing stop manager
+    trailingStopManager = new TrailingStopManager(tradingEngine);
+    trailingStopManager.start();
+    logger.info('[TRAILING] Trailing Stop Manager actif');
   }
 
   // ---- Etape 6 : Ecouter les messages de TOUS les groupes ----
@@ -301,8 +310,10 @@ async function handleMessage(message) {
             }
           }
           logger.info(`[SIGNAL] Traitement termine pour ${parsed.pair} #${insertedSignal.id}`);
-          // Notifier via le bot
-          await reporter.notifyNewSignal(parsed);
+          // Notifier via le bot (en trading reel, le trading engine envoie sa propre alerte)
+          if (!tradingEngine.isActive()) {
+            await reporter.notifyNewSignal(parsed);
+          }
         }
         break;
       }
@@ -323,10 +334,12 @@ async function handleMessage(message) {
             if (tpResult) {
               logger.info(`[TRADE] ${parsed.pair} TP${parsed.targetNumber} : ferme ${tpResult.percentClosed}% | profit=${tpResult.profitNet >= 0 ? '+' : ''}${tpResult.profitNet.toFixed(2)}$ | restant=${tpResult.remainingPercent}%`);
             }
+            // En simulation, notifier via reporter (pas en trading reel - le trading engine gere ses propres alertes)
+            await reporter.notifyConfirmation(parsed);
           } else {
-            logger.info(`[TRADE] ${parsed.pair} TP${parsed.targetNumber} confirme (Binance gere les TPs)`);
+            logger.info(`[TRADE] ${parsed.pair} TP${parsed.targetNumber} confirme par le groupe (Binance/trailing gere les TPs)`);
+            // PAS de notification reporter en mode trading - eviter les doublons avec les alertes du trading engine
           }
-          await reporter.notifyConfirmation(parsed);
         }
         break;
 
@@ -350,14 +363,21 @@ async function handleMessage(message) {
               if (slResult) {
                 logger.info(`[TRADE] ${parsed.pair} SL : ferme ${slResult.percentClosed}% restant | perte=-${slResult.lossNet.toFixed(2)}$ | P&L total=${slResult.pnlTotal.toFixed(2)}$`);
               }
+              await reporter.notifyStopLoss(parsed);
             } else {
-              // Trading reel : fermer sur Binance (si pas deja fait par STOP_MARKET)
-              await tradingEngine.closePosition(slSignal, 'stop_loss');
-              logger.info(`[TRADE] ${parsed.pair} SL : fermeture Binance executee`);
+              // Trading reel : fermer IMMEDIATEMENT sur Binance (signal du groupe = override)
+              logger.warn(`[TRADE] ${parsed.pair} SL du groupe: fermeture immediate!`);
+              // Desactiver le trailing si actif
+              database.updateTrailingInfo(slSignal.id, {
+                trailingActive: 0,
+                slType: 'group_stop_loss',
+              });
+              await tradingEngine.closePosition(slSignal, 'group_stop_loss');
+              logger.info(`[TRADE] ${parsed.pair} SL du groupe: fermeture Binance executee`);
+              // PAS de notification reporter - closePosition envoie sa propre alerte
             }
           }
         }
-        await reporter.notifyStopLoss(parsed);
         break;
       }
 
@@ -388,6 +408,11 @@ async function shutdown(signal) {
     await reporter.sendReport('🔴 *Crypto Signals Tracker arrete.*');
   } catch (err) {
     // Ignorer les erreurs de notification lors de l'arret
+  }
+
+  // Arreter le trailing stop manager
+  if (trailingStopManager) {
+    trailingStopManager.stop();
   }
 
   // Fermer les connexions

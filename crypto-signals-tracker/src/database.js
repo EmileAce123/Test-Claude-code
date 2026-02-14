@@ -234,6 +234,14 @@ function runMigrations() {
     { table: 'signals', column: 'reaction_time_ms', type: 'INTEGER' },
     { table: 'signals', column: 'order_type', type: 'TEXT' },
     { table: 'signals', column: 'price_at_signal', type: 'REAL' },
+    // Colonnes pour le trailing stop
+    { table: 'signals', column: 'current_sl_price', type: 'REAL' },
+    { table: 'signals', column: 'sl_type', type: "TEXT DEFAULT 'none'" },
+    { table: 'signals', column: 'trailing_active', type: 'INTEGER DEFAULT 0' },
+    { table: 'signals', column: 'trailing_distance_percent', type: 'REAL' },
+    { table: 'signals', column: 'highest_price_reached', type: 'REAL' },
+    { table: 'signals', column: 'lowest_price_reached', type: 'REAL' },
+    { table: 'signals', column: 'tp_order_ids', type: 'TEXT' },
   ];
 
   for (const { table, column, type } of columnsToAdd) {
@@ -1021,6 +1029,64 @@ function getReactionTimeStats(date) {
   return row || { avg_ms: 0, max_ms: 0, min_ms: 0, count: 0, slow_count: 0 };
 }
 
+// ============================================================
+// TRAILING STOP - FONCTIONS DATA
+// ============================================================
+
+/**
+ * Recupere les positions avec trailing stop actif.
+ * @returns {Array} Signaux avec trailing_active = 1
+ */
+function getTrailingActivePositions() {
+  return db.prepare(
+    "SELECT * FROM signals WHERE trailing_active = 1 AND status IN ('open', 'partial') ORDER BY created_at DESC"
+  ).all();
+}
+
+/**
+ * Met a jour les infos de trailing stop d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {Object} data - Champs a mettre a jour
+ */
+function updateTrailingInfo(signalId, data) {
+  const fields = [];
+  const params = { signalId };
+
+  if (data.currentSlPrice !== undefined) {
+    fields.push('current_sl_price = @currentSlPrice');
+    params.currentSlPrice = data.currentSlPrice;
+  }
+  if (data.slType !== undefined) {
+    fields.push('sl_type = @slType');
+    params.slType = data.slType;
+  }
+  if (data.trailingActive !== undefined) {
+    fields.push('trailing_active = @trailingActive');
+    params.trailingActive = data.trailingActive;
+  }
+  if (data.trailingDistancePercent !== undefined) {
+    fields.push('trailing_distance_percent = @trailingDistancePercent');
+    params.trailingDistancePercent = data.trailingDistancePercent;
+  }
+  if (data.highestPriceReached !== undefined) {
+    fields.push('highest_price_reached = @highestPriceReached');
+    params.highestPriceReached = data.highestPriceReached;
+  }
+  if (data.lowestPriceReached !== undefined) {
+    fields.push('lowest_price_reached = @lowestPriceReached');
+    params.lowestPriceReached = data.lowestPriceReached;
+  }
+  if (data.tpOrderIds !== undefined) {
+    fields.push('tp_order_ids = @tpOrderIds');
+    params.tpOrderIds = data.tpOrderIds;
+  }
+
+  if (fields.length > 0) {
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    db.prepare(`UPDATE signals SET ${fields.join(', ')} WHERE id = @signalId`).run(params);
+  }
+}
+
 /**
  * Ferme proprement la connexion à la base de données.
  */
@@ -1077,4 +1143,7 @@ module.exports = {
   // Reaction time
   updateSignalReactionInfo,
   getReactionTimeStats,
+  // Trailing stop
+  getTrailingActivePositions,
+  updateTrailingInfo,
 };

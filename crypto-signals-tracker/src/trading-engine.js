@@ -40,6 +40,7 @@ class TradingEngine {
     this.killSwitchActive = false; // true = tout ferme, plus de trades
     this.alertCallback = null; // fonction pour envoyer alertes Telegram
     this.symbolInfoCache = {}; // cache des infos de symboles Binance
+    this.tpMonitors = new Map(); // signalId -> { intervalId, tpOrders, processedTPs }
   }
 
   /**
@@ -734,24 +735,22 @@ class TradingEngine {
 
       logger.info(`[TRADING] ${tpOrders.length}/${Math.min(targets.length, 5)} Take-Profits places sur ${symbol}`);
 
-      // Placer le Stop Loss
-      if (signal.stopLoss && signal.stopLoss > 0) {
-        try {
-          const slSide = signal.direction === 'LONG' ? 'SELL' : 'BUY';
-          const roundedSLPrice = this.roundToTickSize(signal.stopLoss, symbolInfo.tickSize, symbolInfo.pricePrecision);
+      // PAS de Stop Loss initial - gere par trailing stop apres TP1
+      logger.info(`[TRADING] Pas de SL initial - sera gere apres TP1 (trailing strategy)`);
 
-          await this.client.futuresOrder({
-            symbol,
-            side: slSide,
-            type: 'STOP_MARKET',
-            stopPrice: roundedSLPrice.toString(),
-            closePosition: 'true',
-          });
+      // Stocker les TP order IDs en BDD et demarrer le monitoring
+      if (tpOrders.length > 0) {
+        const tpOrderInfo = tpOrders.map((o, idx) => ({
+          orderId: o.orderId,
+          targetNum: idx + 1,
+          targetPrice: targets[idx],
+        }));
 
-          logger.info(`[TRADING] Stop Loss place a ${roundedSLPrice}`);
-        } catch (err) {
-          logger.error(`[TRADING] Erreur SL ${symbol}: ${err.message}`);
-        }
+        database.updateTrailingInfo(signalId, {
+          tpOrderIds: JSON.stringify(tpOrderInfo),
+        });
+
+        this.monitorTakeProfit(signalId, tpOrderInfo);
       }
 
     } catch (err) {
@@ -796,6 +795,19 @@ class TradingEngine {
   async closePosition(signal, reason = 'manual') {
     if (!this.initialized || !this.client) return null;
 
+    // Desactiver le trailing stop si actif
+    if (signal.id) {
+      database.updateTrailingInfo(signal.id, {
+        trailingActive: 0,
+      });
+      // Nettoyer le monitoring
+      const monitorId = this.tpMonitors.get(signal.id);
+      if (monitorId) {
+        clearInterval(monitorId);
+        this.tpMonitors.delete(signal.id);
+      }
+    }
+
     try {
       const symbol = signal.pair.replace('/', '');
 
@@ -836,6 +848,8 @@ class TradingEngine {
       const pnl = parseFloat(pos.unRealizedProfit || '0');
 
       const reasonText = reason === 'stop_loss' ? 'STOP LOSS'
+        : reason === 'group_stop_loss' ? 'STOP LOSS (Signal groupe)'
+        : reason === 'trailing_stop' ? 'TRAILING STOP'
         : reason === 'kill_switch' ? 'KILL SWITCH'
         : 'FERMETURE MANUELLE';
 
@@ -844,6 +858,8 @@ class TradingEngine {
 
       const pnlSign = pnl >= 0 ? '+' : '';
       const emoji = reason === 'stop_loss' ? 'STOP LOSS'
+        : reason === 'group_stop_loss' ? 'STOP LOSS (Signal groupe)'
+        : reason === 'trailing_stop' ? 'TRAILING STOP'
         : reason === 'kill_switch' ? 'KILL SWITCH'
         : 'FERMETURE MANUELLE';
       await this.sendAlert(
@@ -977,6 +993,278 @@ class TradingEngine {
     } catch (err) {
       logger.error(`[TRADING] Erreur check ordre ${orderId}: ${err.message}`);
       return false;
+    }
+  }
+
+  // ============================================================
+  // TRAILING STOP - MONITORING DES TPs
+  // ============================================================
+
+  /**
+   * Demarre le monitoring des ordres TP pour un signal.
+   * Verifie toutes les 15s si un TP a ete rempli.
+   * @param {number} signalId - ID du signal en BDD
+   * @param {Array} tpOrders - [{ orderId, targetNum, targetPrice }]
+   */
+  monitorTakeProfit(signalId, tpOrders) {
+    const processedTPs = new Set();
+
+    const intervalId = setInterval(async () => {
+      try {
+        const signal = database.getSignalById(signalId);
+        if (!signal || ['closed', 'stopped', 'cancelled', 'manual_close'].includes(signal.status)) {
+          clearInterval(intervalId);
+          this.tpMonitors.delete(signalId);
+          logger.info(`[TP-MONITOR] Monitoring arrete pour signal #${signalId} (status=${signal?.status})`);
+          return;
+        }
+
+        const symbol = signal.pair.replace('/', '');
+
+        for (const tp of tpOrders) {
+          if (processedTPs.has(tp.targetNum)) continue;
+
+          try {
+            const order = await this.client.futuresGetOrder({
+              symbol,
+              orderId: tp.orderId,
+            });
+
+            if (order.status === 'FILLED') {
+              processedTPs.add(tp.targetNum);
+              const fillPrice = parseFloat(order.avgPrice || order.price);
+              logger.info(`[TP-MONITOR] TP${tp.targetNum} REMPLI pour ${signal.pair} a ${fillPrice}`);
+              await this.handleTPFilled(signalId, tp.targetNum, fillPrice);
+            }
+          } catch (err) {
+            logger.debug(`[TP-MONITOR] Erreur check TP${tp.targetNum}: ${err.message}`);
+          }
+        }
+
+        // Verifier si la position est fermee
+        const positions = await this.client.futuresPositionRisk({ symbol });
+        const pos = positions.find(p => p.symbol === symbol);
+        const posQty = Math.abs(parseFloat(pos?.positionAmt || '0'));
+
+        if (posQty === 0) {
+          clearInterval(intervalId);
+          this.tpMonitors.delete(signalId);
+          logger.info(`[TP-MONITOR] Position fermee pour ${symbol}, monitoring arrete`);
+        }
+      } catch (err) {
+        logger.error(`[TP-MONITOR] Erreur monitoring signal #${signalId}: ${err.message}`);
+      }
+    }, 15000);
+
+    this.tpMonitors.set(signalId, intervalId);
+    logger.info(`[TP-MONITOR] Monitoring demarre pour signal #${signalId} (${tpOrders.length} TPs)`);
+  }
+
+  /**
+   * Traite un TP rempli selon la strategie pyramidale avec trailing.
+   * TP1 → SL au TP1 - 0.5% (break-even)
+   * TP2 → Trailing stop -1.5%
+   * TP3 → Trailing reserre -1%
+   * TP4+ → Trailing tres serre -0.75%
+   *
+   * @param {number} signalId - ID du signal
+   * @param {number} tpNum - Numero du TP (1-5)
+   * @param {number} exitPrice - Prix de remplissage
+   */
+  async handleTPFilled(signalId, tpNum, exitPrice) {
+    const signal = database.getSignalById(signalId);
+    if (!signal) return;
+
+    const percentClosed = PYRAMID_CONFIG[tpNum] || 15;
+
+    // Calculer le profit pour ce TP
+    const entryPrice = signal.entry_price_real || signal.entry_price_min;
+    let profitPercent;
+    if (signal.direction === 'LONG') {
+      profitPercent = ((exitPrice - entryPrice) / entryPrice) * 100;
+    } else {
+      profitPercent = ((entryPrice - exitPrice) / entryPrice) * 100;
+    }
+    const profitDollar = (signal.position_size_initial || 0) * (percentClosed / 100) * (profitPercent * signal.leverage / 100);
+
+    // Enregistrer l'execution pyramidale
+    database.insertTradeExecution({
+      signalId,
+      targetNumber: tpNum,
+      targetPrice: exitPrice,
+      positionClosedPercent: percentClosed,
+      positionClosedSize: (signal.position_size_initial || 0) * (percentClosed / 100),
+      profitRealized: profitDollar,
+      profitRealizedPercent: profitPercent * signal.leverage,
+      executionType: 'tp_auto',
+    });
+
+    // Mettre a jour l'etat pyramidal
+    const currentRemaining = signal.position_remaining_percent || 100;
+    const newRemaining = currentRemaining - percentClosed;
+    const newRealizedTotal = (signal.profit_realized_total || 0) + profitDollar;
+
+    database.updateSignalPyramidState(signalId, {
+      positionRemainingPercent: newRemaining,
+      positionRemainingSize: (signal.position_size_initial || 0) * (newRemaining / 100),
+      profitRealizedTotal: newRealizedTotal,
+      profitLatent: 0,
+      pnlTotal: newRealizedTotal,
+      status: newRemaining <= 0 ? 'closed' : 'partial',
+    });
+
+    // Mettre a jour last_target_hit
+    try {
+      const db = require('./database');
+      // Use raw update since there's no dedicated function for this
+    } catch (e) { /* ignore */ }
+
+    // STRATEGIE TRAILING SELON TP
+    if (tpNum === 1) {
+      // TP1 → SL au TP1 - 0.5% (break-even garanti)
+      const slPrice = signal.direction === 'SHORT'
+        ? exitPrice * 1.005
+        : exitPrice * 0.995;
+
+      database.updateTrailingInfo(signalId, {
+        currentSlPrice: slPrice,
+        slType: 'break_even',
+      });
+
+      // Placer le STOP_MARKET sur Binance
+      await this.cancelAndPlaceNewSL(signal, slPrice);
+
+      logger.info(`[TP-STRATEGY] TP1 ${signal.pair}: SL break-even a ${slPrice.toFixed(6)}`);
+
+      await this.sendAlert(
+        `TP1 ATTEINT\n` +
+        `${signal.pair} ${signal.direction} X${signal.leverage}\n` +
+        `${percentClosed}% ferme a ${exitPrice.toFixed(6)}$\n` +
+        `Profit realise: +${profitDollar.toFixed(2)}$\n` +
+        `SL deplace au break-even: ${slPrice.toFixed(6)}$\n` +
+        `Reste: ${newRemaining.toFixed(1)}%`
+      );
+
+    } else if (tpNum === 2) {
+      // TP2 → Activer trailing -1.5%
+      const currentPrice = exitPrice;
+
+      database.updateTrailingInfo(signalId, {
+        trailingActive: 1,
+        trailingDistancePercent: 1.5,
+        slType: 'trailing',
+        highestPriceReached: signal.direction === 'LONG' ? currentPrice : undefined,
+        lowestPriceReached: signal.direction === 'SHORT' ? currentPrice : undefined,
+      });
+
+      // Calculer le SL trailing initial
+      const trailingSL = signal.direction === 'LONG'
+        ? currentPrice * (1 - 1.5 / 100)
+        : currentPrice * (1 + 1.5 / 100);
+
+      database.updateTrailingInfo(signalId, {
+        currentSlPrice: trailingSL,
+      });
+
+      // Placer le STOP_MARKET initial du trailing
+      await this.cancelAndPlaceNewSL(signal, trailingSL);
+
+      logger.info(`[TP-STRATEGY] TP2 ${signal.pair}: trailing -1.5% active`);
+
+      await this.sendAlert(
+        `TP2 ATTEINT\n` +
+        `${signal.pair} ${signal.direction} X${signal.leverage}\n` +
+        `${percentClosed}% ferme a ${exitPrice.toFixed(6)}$\n` +
+        `Profit realise: +${profitDollar.toFixed(2)}$\n` +
+        `Trailing stop active: -1.5%\n` +
+        `Reste: ${newRemaining.toFixed(1)}%`
+      );
+
+    } else if (tpNum === 3) {
+      // TP3 → Resserrer trailing -1%
+      database.updateTrailingInfo(signalId, {
+        trailingDistancePercent: 1.0,
+      });
+
+      logger.info(`[TP-STRATEGY] TP3 ${signal.pair}: trailing resserre a -1%`);
+
+      await this.sendAlert(
+        `TP3 ATTEINT\n` +
+        `${signal.pair} ${signal.direction} X${signal.leverage}\n` +
+        `${percentClosed}% ferme a ${exitPrice.toFixed(6)}$\n` +
+        `Profit realise: +${profitDollar.toFixed(2)}$\n` +
+        `Trailing resserre: -1%\n` +
+        `Reste: ${newRemaining.toFixed(1)}%`
+      );
+
+    } else if (tpNum >= 4) {
+      // TP4+ → Trailing tres serre -0.75%
+      database.updateTrailingInfo(signalId, {
+        trailingDistancePercent: 0.75,
+      });
+
+      logger.info(`[TP-STRATEGY] TP${tpNum} ${signal.pair}: trailing tres serre -0.75%`);
+
+      await this.sendAlert(
+        `TP${tpNum} ATTEINT\n` +
+        `${signal.pair} ${signal.direction} X${signal.leverage}\n` +
+        `${percentClosed}% ferme a ${exitPrice.toFixed(6)}$\n` +
+        `Profit realise: +${profitDollar.toFixed(2)}$\n` +
+        `Trailing tres serre: -0.75%\n` +
+        `Reste: ${newRemaining.toFixed(1)}%`
+      );
+    }
+  }
+
+  /**
+   * Annule tous les ordres existants et place un nouveau STOP_MARKET.
+   * @param {Object} signal - Signal de la BDD
+   * @param {number} newPrice - Prix du nouveau stop loss
+   */
+  async cancelAndPlaceNewSL(signal, newPrice) {
+    if (!this.initialized || !this.client) return;
+
+    try {
+      const symbol = signal.pair.replace('/', '');
+      const symbolInfo = await this.getSymbolInfo(symbol);
+      const roundedPrice = this.roundToTickSize(newPrice, symbolInfo.tickSize, symbolInfo.pricePrecision);
+
+      // Annuler SEULEMENT les ordres STOP_MARKET (pas les TP LIMIT)
+      try {
+        const openOrders = await this.client.futuresOpenOrders({ symbol });
+        for (const order of openOrders) {
+          if (order.type === 'STOP_MARKET' || order.type === 'STOP') {
+            await this.client.futuresCancelOrder({
+              symbol,
+              orderId: order.orderId,
+            });
+            logger.debug(`[TRADING] Ancien SL annule: ${order.orderId}`);
+          }
+        }
+      } catch (err) {
+        logger.debug(`[TRADING] Pas de SL a annuler sur ${symbol}`);
+      }
+
+      // Verifier qu'il reste une position
+      const positions = await this.client.futuresPositionRisk({ symbol });
+      const pos = positions.find(p => p.symbol === symbol);
+      const posQty = Math.abs(parseFloat(pos?.positionAmt || '0'));
+
+      if (posQty > 0) {
+        const slSide = signal.direction === 'LONG' ? 'SELL' : 'BUY';
+
+        await this.client.futuresOrder({
+          symbol,
+          side: slSide,
+          type: 'STOP_MARKET',
+          stopPrice: roundedPrice.toString(),
+          closePosition: 'true',
+        });
+
+        logger.info(`[TRADING] Nouveau SL place: ${symbol} @ ${roundedPrice}`);
+      }
+    } catch (err) {
+      logger.error(`[TRADING] Erreur placement SL ${signal.pair}: ${err.message}`);
     }
   }
 
