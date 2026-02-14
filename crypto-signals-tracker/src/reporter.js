@@ -296,6 +296,7 @@ async function buildDailyReport(tradingEngine) {
   const dayStats = database.getDaySignalStats(today);
   const bestTrade = database.getBestTradeOfDay(today);
   const worstTrade = database.getWorstTradeOfDay(today);
+  const reactionStats = database.getReactionTimeStats(today);
 
   let msg = `RAPPORT QUOTIDIEN ${dateStr}\n\n`;
 
@@ -331,6 +332,16 @@ async function buildDailyReport(tradingEngine) {
     }
     if (dayStats.liquidations > 0) {
       msg += `\nLiquidations: ${dayStats.liquidations}`;
+    }
+  }
+
+  // Temps de reaction
+  if (reactionStats.count > 0) {
+    msg += `\n\nTemps de reaction:`;
+    msg += `\n  Moyen: ${reactionStats.avg_ms}ms`;
+    msg += `\n  Max: ${reactionStats.max_ms}ms`;
+    if (reactionStats.slow_count > 0) {
+      msg += `\n  Lents (>5s): ${reactionStats.slow_count}`;
     }
   }
 

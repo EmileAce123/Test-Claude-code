@@ -268,6 +268,109 @@ class TradingEngine {
   }
 
   /**
+   * Recupere le prix actuel d'un symbole via Binance Futures.
+   * @param {string} symbol - Ex: "BTCUSDT"
+   * @returns {number} Prix actuel
+   */
+  async getCurrentPrice(symbol) {
+    if (!this.initialized || !this.client) {
+      throw new Error('Trading engine non initialise');
+    }
+
+    const ticker = await this.client.futuresPrices({ symbol });
+    const price = parseFloat(ticker[symbol]);
+    if (!price || isNaN(price)) {
+      throw new Error(`Prix non disponible pour ${symbol}`);
+    }
+    return price;
+  }
+
+  /**
+   * Analyse la position du prix actuel par rapport a la zone d'entree.
+   * Determine le type d'ordre optimal a passer.
+   *
+   * LONG:
+   *   - Prix < entryMin (sous la zone) → MARKET (prix favorable)
+   *   - Prix entre entryMin et midZone → LIMIT_CURRENT (bonne moitie)
+   *   - Prix entre midZone et entryMax → LIMIT_MID (moitie haute, limit au milieu)
+   *   - Prix > entryMax → SKIP (prix a depasse la zone)
+   *
+   * SHORT:
+   *   - Prix > entryMax (au-dessus de la zone) → MARKET (prix favorable)
+   *   - Prix entre midZone et entryMax → LIMIT_CURRENT (bonne moitie)
+   *   - Prix entre entryMin et midZone → LIMIT_MID (moitie basse, limit au milieu)
+   *   - Prix < entryMin → SKIP (prix a depasse la zone)
+   *
+   * @param {number} currentPrice - Prix actuel du marche
+   * @param {number} entryMin - Borne inferieure de la zone d'entree
+   * @param {number} entryMax - Borne superieure de la zone d'entree
+   * @param {string} direction - "LONG" ou "SHORT"
+   * @returns {{ action: string, reason: string, limitPrice: number|null }}
+   */
+  analyzePricePosition(currentPrice, entryMin, entryMax, direction) {
+    const midZone = (entryMin + entryMax) / 2;
+
+    if (direction === 'LONG') {
+      if (currentPrice < entryMin) {
+        return {
+          action: 'MARKET',
+          reason: `Prix ${currentPrice} sous la zone (< ${entryMin}) - favorable`,
+          limitPrice: null,
+        };
+      }
+      if (currentPrice >= entryMin && currentPrice <= midZone) {
+        return {
+          action: 'LIMIT_CURRENT',
+          reason: `Prix ${currentPrice} dans la bonne moitie [${entryMin}-${midZone}]`,
+          limitPrice: currentPrice,
+        };
+      }
+      if (currentPrice > midZone && currentPrice <= entryMax) {
+        return {
+          action: 'LIMIT_MID',
+          reason: `Prix ${currentPrice} dans moitie haute [${midZone}-${entryMax}], limit au milieu`,
+          limitPrice: midZone,
+        };
+      }
+      // currentPrice > entryMax
+      return {
+        action: 'SKIP',
+        reason: `Prix ${currentPrice} au-dessus de la zone (> ${entryMax}) - rate`,
+        limitPrice: null,
+      };
+    }
+
+    // SHORT
+    if (currentPrice > entryMax) {
+      return {
+        action: 'MARKET',
+        reason: `Prix ${currentPrice} au-dessus de la zone (> ${entryMax}) - favorable`,
+        limitPrice: null,
+      };
+    }
+    if (currentPrice <= entryMax && currentPrice >= midZone) {
+      return {
+        action: 'LIMIT_CURRENT',
+        reason: `Prix ${currentPrice} dans la bonne moitie [${midZone}-${entryMax}]`,
+        limitPrice: currentPrice,
+      };
+    }
+    if (currentPrice < midZone && currentPrice >= entryMin) {
+      return {
+        action: 'LIMIT_MID',
+        reason: `Prix ${currentPrice} dans moitie basse [${entryMin}-${midZone}], limit au milieu`,
+        limitPrice: midZone,
+      };
+    }
+    // currentPrice < entryMin
+    return {
+      action: 'SKIP',
+      reason: `Prix ${currentPrice} sous la zone (< ${entryMin}) - rate`,
+      limitPrice: null,
+    };
+  }
+
+  /**
    * Valide qu'un trade peut etre execute (securites).
    * @param {Object} signal - Signal parse
    * @param {number} balance - Balance disponible
@@ -333,12 +436,17 @@ class TradingEngine {
   }
 
   /**
-   * Ouvre une position avec un ordre LIMIT dans la zone d'entree.
+   * Ouvre une position en analysant le prix actuel par rapport a la zone d'entree.
+   * Choisit automatiquement MARKET, LIMIT ou SKIP selon la position du prix.
+   * Mesure le temps de reaction (ms) entre reception du signal et passage de l'ordre.
+   *
    * @param {Object} signal - Signal parse (pair, direction, leverage, entryPriceMin, entryPriceMax, targets, stopLoss)
    * @param {number} signalId - ID du signal en BDD
+   * @param {number} [signalReceivedAt] - Timestamp ms de reception du signal (Date.now())
    * @returns {Object|null} Ordre Binance ou null
    */
-  async openPosition(signal, signalId) {
+  async openPosition(signal, signalId, signalReceivedAt) {
+    const startTime = signalReceivedAt || Date.now();
     logger.info(`[TRADING] === openPosition() appele pour ${signal.pair} ${signal.direction} (signalId=${signalId}) ===`);
 
     if (!this.enabled || !this.initialized || !this.client) {
@@ -373,8 +481,48 @@ class TradingEngine {
       logger.info(`[TRADING] Etape 3: Recuperation des infos symbole ${symbol}...`);
       const symbolInfo = await this.getSymbolInfo(symbol);
 
-      // 4. Prix d'entree = milieu de zone
-      const entryPrice = (signal.entryPriceMin + signal.entryPriceMax) / 2;
+      // 4. Recuperer le prix actuel et analyser la position
+      logger.info(`[TRADING] Etape 4: Analyse du prix actuel...`);
+      const currentPrice = await this.getCurrentPrice(symbol);
+      const analysis = this.analyzePricePosition(
+        currentPrice, signal.entryPriceMin, signal.entryPriceMax, signal.direction
+      );
+      logger.info(`[TRADING] Prix actuel ${symbol}: ${currentPrice} | Action: ${analysis.action} | ${analysis.reason}`);
+
+      // Stocker le prix au moment du signal
+      database.updateSignalReactionInfo(signalId, { priceAtSignal: currentPrice });
+
+      // SKIP : prix hors zone, on ne trade pas
+      if (analysis.action === 'SKIP') {
+        logger.warn(`[TRADING] SKIP ${signal.pair}: ${analysis.reason}`);
+        const reactionTimeMs = Date.now() - startTime;
+        database.updateSignalReactionInfo(signalId, {
+          reactionTimeMs,
+          orderType: 'SKIP',
+        });
+        await this.sendAlert(
+          `SIGNAL IGNORE (prix hors zone)\n` +
+          `${signal.pair} ${signal.direction}\n` +
+          `${analysis.reason}\n` +
+          `Temps de reaction: ${reactionTimeMs}ms`
+        );
+        return null;
+      }
+
+      // Determiner le prix d'entree selon l'analyse
+      let entryPrice;
+      let orderType;
+      if (analysis.action === 'MARKET') {
+        entryPrice = currentPrice;
+        orderType = 'MARKET';
+      } else if (analysis.action === 'LIMIT_CURRENT') {
+        entryPrice = currentPrice;
+        orderType = 'LIMIT';
+      } else {
+        // LIMIT_MID
+        entryPrice = analysis.limitPrice;
+        orderType = 'LIMIT';
+      }
 
       // 5. Definir le leverage sur Binance (avec auto-ajustement)
       logger.info(`[TRADING] Etape 5: Configuration leverage ${leverage}x sur ${symbol}...`);
@@ -390,7 +538,7 @@ class TradingEngine {
         const fallbackLeverages = [20, 10, 5, 3, 2, 1];
         let leverageSet = false;
         for (const fallback of fallbackLeverages) {
-          if (fallback >= leverage) continue; // Skip ceux >= au leverage refuse
+          if (fallback >= leverage) continue;
           try {
             await this.client.futuresLeverage({ symbol, leverage: fallback });
             leverage = fallback;
@@ -420,6 +568,7 @@ class TradingEngine {
       const roundedPrice = this.roundToTickSize(entryPrice, symbolInfo.tickSize, symbolInfo.pricePrecision);
 
       logger.info(`[TRADING] Etape 6: Calcul -> position=${positionSize.toFixed(2)}$, leverage=${leverage}x, notional=${notional.toFixed(2)}$`);
+      logger.info(`[TRADING]   Type d'ordre: ${orderType} (${analysis.action})`);
       logger.info(`[TRADING]   Prix: brut=${entryPrice} -> arrondi=${roundedPrice} (precision=${symbolInfo.pricePrecision}, tickSize=${symbolInfo.tickSize})`);
       logger.info(`[TRADING]   Quantite: brute=${notional / entryPrice} -> arrondie=${quantity} (precision=${symbolInfo.quantityPrecision}, stepSize=${symbolInfo.stepSize})`);
 
@@ -434,47 +583,82 @@ class TradingEngine {
         throw new Error(`Quantite calculee = 0 pour ${symbol} (position trop petite)`);
       }
 
-      // 7. Passer l'ordre LIMIT
-      logger.info(`[TRADING] Etape 7: Passage de l'ordre LIMIT...`);
+      // 7. Passer l'ordre
+      logger.info(`[TRADING] Etape 7: Passage de l'ordre ${orderType}...`);
       const side = signal.direction === 'LONG' ? 'BUY' : 'SELL';
 
-      const order = await this.client.futuresOrder({
-        symbol,
-        side,
-        type: 'LIMIT',
-        quantity: quantity.toString(),
-        price: roundedPrice.toString(),
-        timeInForce: 'GTC',
-      });
+      let orderParams;
+      if (orderType === 'MARKET') {
+        orderParams = {
+          symbol,
+          side,
+          type: 'MARKET',
+          quantity: quantity.toString(),
+        };
+      } else {
+        orderParams = {
+          symbol,
+          side,
+          type: 'LIMIT',
+          quantity: quantity.toString(),
+          price: roundedPrice.toString(),
+          timeInForce: 'GTC',
+        };
+      }
 
-      logger.info(`[TRADING] ORDRE OUVERT: ${symbol} ${side} X${leverage}`);
+      const order = await this.client.futuresOrder(orderParams);
+
+      // 8. Mesurer le temps de reaction
+      const reactionTimeMs = Date.now() - startTime;
+
+      logger.info(`[TRADING] ORDRE OUVERT: ${symbol} ${side} ${orderType} X${leverage}`);
       logger.info(`[TRADING]   Quantite: ${quantity} | Prix: ${roundedPrice}`);
       logger.info(`[TRADING]   Order ID: ${order.orderId}`);
       logger.info(`[TRADING]   Position: ${positionSize.toFixed(2)}$ (${this.maxPositionPercent}% de ${balance.toFixed(2)}$)`);
+      logger.info(`[TRADING]   Temps de reaction: ${reactionTimeMs}ms`);
 
-      // 8. Stocker l'order ID en BDD
+      // 9. Stocker l'order ID et les infos de reaction en BDD
       database.updateSignalBinanceOrder(signalId, {
         binanceOrderId: order.orderId.toString(),
         entryPriceReal: entryPrice,
       });
+      database.updateSignalReactionInfo(signalId, {
+        reactionTimeMs,
+        orderType: `${orderType}_${analysis.action}`,
+      });
 
-      // 9. Alerte Telegram
-      await this.sendAlert(
+      // 10. Alertes Telegram
+      let alertMsg =
         `POSITION OUVERTE\n` +
         `${signal.pair} ${signal.direction} X${leverage}\n` +
-        `Prix entree: ${roundedPrice}$\n` +
+        `Prix entree: ${roundedPrice}$ (${orderType})\n` +
         `Taille: ${positionSize.toFixed(2)}$\n` +
-        `Order ID: ${order.orderId}`
-      );
+        `Order ID: ${order.orderId}\n` +
+        `Reaction: ${reactionTimeMs}ms`;
+
+      // Alerte latence
+      if (reactionTimeMs > 10000) {
+        alertMsg += `\n\nLATENCE CRITIQUE: ${(reactionTimeMs / 1000).toFixed(1)}s`;
+      } else if (reactionTimeMs > 5000) {
+        alertMsg += `\n\nLatence elevee: ${(reactionTimeMs / 1000).toFixed(1)}s`;
+      }
+
+      await this.sendAlert(alertMsg);
 
       return order;
 
     } catch (err) {
-      logger.error(`[TRADING] Erreur ouverture ${signal.pair}: ${err.message}`);
+      const reactionTimeMs = Date.now() - startTime;
+      logger.error(`[TRADING] Erreur ouverture ${signal.pair}: ${err.message} (apres ${reactionTimeMs}ms)`);
+      database.updateSignalReactionInfo(signalId, {
+        reactionTimeMs,
+        orderType: 'ERROR',
+      });
       await this.sendAlert(
         `ERREUR OUVERTURE\n` +
         `${signal.pair} ${signal.direction}\n` +
-        `Erreur: ${err.message}`
+        `Erreur: ${err.message}\n` +
+        `Reaction: ${reactionTimeMs}ms`
       );
       return null;
     }

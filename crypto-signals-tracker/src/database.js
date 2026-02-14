@@ -230,6 +230,10 @@ function runMigrations() {
     { table: 'signals', column: 'binance_order_id', type: 'TEXT' },
     { table: 'signals', column: 'binance_status', type: "TEXT DEFAULT 'none'" },
     { table: 'trade_executions', column: 'binance_order_id', type: 'TEXT' },
+    // Colonnes pour le temps de reaction et type d'ordre
+    { table: 'signals', column: 'reaction_time_ms', type: 'INTEGER' },
+    { table: 'signals', column: 'order_type', type: 'TEXT' },
+    { table: 'signals', column: 'price_at_signal', type: 'REAL' },
   ];
 
   for (const { table, column, type } of columnsToAdd) {
@@ -971,6 +975,53 @@ function getWorstTradeOfDay(date) {
 }
 
 /**
+ * Met a jour les infos de reaction time et type d'ordre d'un signal.
+ * @param {number} signalId - ID du signal
+ * @param {Object} data - { reactionTimeMs, orderType, priceAtSignal }
+ */
+function updateSignalReactionInfo(signalId, data) {
+  const fields = [];
+  const params = { signalId };
+
+  if (data.reactionTimeMs !== undefined) {
+    fields.push('reaction_time_ms = @reactionTimeMs');
+    params.reactionTimeMs = data.reactionTimeMs;
+  }
+  if (data.orderType !== undefined) {
+    fields.push('order_type = @orderType');
+    params.orderType = data.orderType;
+  }
+  if (data.priceAtSignal !== undefined) {
+    fields.push('price_at_signal = @priceAtSignal');
+    params.priceAtSignal = data.priceAtSignal;
+  }
+
+  if (fields.length > 0) {
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    db.prepare(`UPDATE signals SET ${fields.join(', ')} WHERE id = @signalId`).run(params);
+  }
+}
+
+/**
+ * Recupere les statistiques de temps de reaction pour une date donnee.
+ * @param {string} date - Date au format YYYY-MM-DD
+ * @returns {Object} { avg_ms, max_ms, min_ms, count, slow_count }
+ */
+function getReactionTimeStats(date) {
+  const row = db.prepare(`
+    SELECT
+      CAST(AVG(reaction_time_ms) AS INTEGER) as avg_ms,
+      MAX(reaction_time_ms) as max_ms,
+      MIN(reaction_time_ms) as min_ms,
+      COUNT(reaction_time_ms) as count,
+      SUM(CASE WHEN reaction_time_ms > 5000 THEN 1 ELSE 0 END) as slow_count
+    FROM signals
+    WHERE date(created_at) = ? AND reaction_time_ms IS NOT NULL
+  `).get(date);
+  return row || { avg_ms: 0, max_ms: 0, min_ms: 0, count: 0, slow_count: 0 };
+}
+
+/**
  * Ferme proprement la connexion à la base de données.
  */
 function close() {
@@ -1023,4 +1074,7 @@ module.exports = {
   getDaySignalStats,
   getBestTradeOfDay,
   getWorstTradeOfDay,
+  // Reaction time
+  updateSignalReactionInfo,
+  getReactionTimeStats,
 };

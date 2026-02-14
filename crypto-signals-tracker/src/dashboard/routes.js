@@ -704,6 +704,20 @@ router.post('/emergency/close-all', async (req, res) => {
   }
 });
 
+// ---- GET /api/reaction-time ----
+// Retourne les statistiques de temps de reaction
+// Query params : ?date=2024-01-15 (defaut: aujourd'hui)
+router.get('/reaction-time', (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const stats = database.getReactionTimeStats(date);
+    res.json({ date, ...stats });
+  } catch (err) {
+    logger.error(`Erreur API /reaction-time : ${err.message}`);
+    res.status(500).json({ error: 'Erreur stats temps de reaction' });
+  }
+});
+
 // ---- POST /api/trading/kill-switch/reset ----
 // Desactive le kill switch pour reprendre le trading
 router.post('/trading/kill-switch/reset', (req, res) => {

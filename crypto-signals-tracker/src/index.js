@@ -249,7 +249,8 @@ async function handleMessage(message) {
     // Traiter selon le type de message
     switch (parsed.type) {
       case 'signal': {
-        // Nouveau signal de trading
+        // Nouveau signal de trading - capturer le timestamp immediatement
+        const signalReceivedAt = Date.now();
         logger.info(`[SIGNAL] === Nouveau signal detecte: ${parsed.pair} ${parsed.direction} X${parsed.leverage} ===`);
         logger.info(`[SIGNAL] Targets: ${JSON.stringify(parsed.targets)} | SL: ${parsed.stopLoss} | Entry: ${parsed.entryPriceMin}-${parsed.entryPriceMax}`);
         logger.info(`[SIGNAL] Trading engine actif: ${tradingEngine.isActive()} (mode=${tradingEngine.mode}, enabled=${tradingEngine.enabled})`);
@@ -267,7 +268,7 @@ async function handleMessage(message) {
           // Trading reel : ouvrir position sur Binance
           if (tradingEngine.isActive()) {
             logger.info(`[SIGNAL] Lancement de openPosition() pour ${parsed.pair}...`);
-            const order = await tradingEngine.openPosition(parsed, insertedSignal.id);
+            const order = await tradingEngine.openPosition(parsed, insertedSignal.id, signalReceivedAt);
             if (order) {
               logger.info(`[SIGNAL] Ordre Binance place avec succes: orderId=${order.orderId}`);
               // Attendre un peu puis verifier + placer les TPs
