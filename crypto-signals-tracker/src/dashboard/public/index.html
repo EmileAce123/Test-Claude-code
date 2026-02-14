@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dashboard - Crypto Signals Tracker</title>
+  <title>Crypto Signals Tracker</title>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,316 +12,94 @@
   <header class="header">
     <div class="header-left">
       <h1>Crypto Signals Tracker</h1>
-      <div class="header-status">
-        <span class="status-dot" id="statusDot"></span>
-        <span id="statusText">Chargement...</span>
-      </div>
+      <span class="mode-badge" id="modeBadge">--</span>
     </div>
     <div class="header-right">
-      <span class="trading-mode-badge" id="tradingModeBadge">--</span>
-      <span class="trading-balance" id="tradingBalance"></span>
-      <div class="realtime-indicator" id="realtimeIndicator">
-        <span class="rt-dot" id="rtDot"></span>
-        <span id="rtText">--</span>
+      <div class="account-info">
+        <div class="info-block">
+          <span class="info-label">Balance Binance</span>
+          <strong class="info-value" id="balance">--</strong>
+        </div>
+        <div class="info-block">
+          <span class="info-label">P&L Aujourd'hui</span>
+          <strong class="info-value" id="pnlToday">--</strong>
+        </div>
       </div>
-      <span class="last-refresh" id="lastRefresh"></span>
-      <button class="btn" onclick="refreshAll()">Rafraichir</button>
-      <a class="btn" href="/api/export-csv">Export CSV</a>
-      <button class="btn btn-kill-switch" id="killSwitchBtn" onclick="emergencyCloseAll()" style="display:none">KILL SWITCH</button>
-      <button class="btn btn-logout" onclick="logout()">Deconnexion</button>
+      <button class="kill-switch" id="killSwitchBtn" onclick="emergencyClose()">KILL SWITCH</button>
     </div>
   </header>
 
   <!-- ========== CONTENU PRINCIPAL ========== -->
   <div class="container">
 
-    <!-- ---- KPI Cards ---- -->
-    <section class="kpi-grid" id="kpiGrid">
-      <div class="kpi-card">
-        <div class="kpi-label">Profit cumule</div>
-        <div class="kpi-value neutral" id="kpiTotalProfit">--</div>
-        <div class="kpi-sub" id="kpiTotalProfitSub"></div>
+    <!-- ---- Stats Grid (4 cartes) ---- -->
+    <section class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-value" id="totalTrades">0</div>
+        <div class="stat-label">Trades aujourd'hui</div>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Win Rate</div>
-        <div class="kpi-value neutral" id="kpiWinRate">--</div>
-        <div class="kpi-sub" id="kpiWinRateSub"></div>
+      <div class="stat-card">
+        <div class="stat-value" id="openPositions">0</div>
+        <div class="stat-label">Positions ouvertes</div>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Total trades</div>
-        <div class="kpi-value neutral" id="kpiTotalTrades">--</div>
-        <div class="kpi-sub" id="kpiTotalTradesSub"></div>
+      <div class="stat-card success">
+        <div class="stat-value" id="winRate">0%</div>
+        <div class="stat-label">Win rate (7j)</div>
       </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Profit moyen / trade</div>
-        <div class="kpi-value neutral" id="kpiAvgProfit">--</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Meilleur trade</div>
-        <div class="kpi-value positive" id="kpiBestTrade">--</div>
-        <div class="kpi-sub" id="kpiBestTradeSub"></div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Pire trade</div>
-        <div class="kpi-value negative" id="kpiWorstTrade">--</div>
-        <div class="kpi-sub" id="kpiWorstTradeSub"></div>
+      <div class="stat-card">
+        <div class="stat-value" id="avgReaction">--</div>
+        <div class="stat-label">Temps reaction moyen</div>
       </div>
     </section>
 
-    <!-- ---- Section Portefeuille (Virtuel ou Binance) ---- -->
-    <section class="portfolio-section" id="portfolioSection">
-      <h2 class="section-title" id="portfolioTitle">Portefeuille virtuel</h2>
+    <!-- ---- Positions ouvertes ---- -->
+    <section class="section">
+      <h2 class="section-title">Positions ouvertes <span id="countOpen">(0)</span></h2>
 
-      <!-- Contenu SIMULATION (virtuel) -->
-      <div id="portfolioSimulation">
-        <div class="portfolio-cards">
-          <div class="stat-card">
-            <div class="stat-label">Capital actuel</div>
-            <div class="stat-value" id="portfolioCapital">--</div>
-            <div class="stat-sub" id="portfolioCapitalSub"></div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">ROI</div>
-            <div class="stat-value" id="portfolioRoi">--</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Gain net</div>
-            <div class="stat-value" id="portfolioGain">--</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Frais cumules</div>
-            <div class="stat-value neutral" id="portfolioFees">--</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Win Rate (portfolio)</div>
-            <div class="stat-value" id="portfolioWinRate">--</div>
-            <div class="stat-sub" id="portfolioWinRateSub"></div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Pertes consec. max</div>
-            <div class="stat-value neutral" id="portfolioMaxLosses">--</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Exposition</div>
-            <div class="stat-value neutral" id="portfolioExposure">--</div>
-            <div class="stat-sub" id="portfolioExposureSub"></div>
-          </div>
-        </div>
-        <div class="chart-card full-width" style="margin-top: 16px;">
-          <div class="chart-title">Evolution du capital ($)</div>
-          <div class="chart-container">
-            <canvas id="portfolioChart"></canvas>
-          </div>
-        </div>
-      </div>
+      <table class="positions-table" id="positionsTable" style="display:none">
+        <thead>
+          <tr>
+            <th>Paire</th>
+            <th>Direction</th>
+            <th>Leverage</th>
+            <th>Prix entree</th>
+            <th>Prix actuel</th>
+            <th>P&L</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="positionsList"></tbody>
+      </table>
 
-      <!-- Contenu TRADING REEL (Binance) -->
-      <div id="portfolioBinance" style="display:none">
-        <div class="portfolio-cards">
-          <div class="stat-card">
-            <div class="stat-label">Balance totale</div>
-            <div class="stat-value" id="binanceTotalBalance">--</div>
-            <div class="stat-sub" id="binanceTotalBalanceSub"></div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Disponible</div>
-            <div class="stat-value" id="binanceAvailable">--</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">P&L non realise</div>
-            <div class="stat-value" id="binanceUnrealizedPnl">--</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Marge utilisee</div>
-            <div class="stat-value neutral" id="binanceMargin">--</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-label">Positions ouvertes</div>
-            <div class="stat-value neutral" id="binanceOpenCount">--</div>
-          </div>
-        </div>
-
-        <!-- Tableau positions Binance -->
-        <div class="chart-card full-width" style="margin-top: 16px;">
-          <div class="chart-title">Positions Binance</div>
-          <table class="trades-table">
-            <thead>
-              <tr>
-                <th>Paire</th>
-                <th>Direction</th>
-                <th>Leverage</th>
-                <th>Prix entree</th>
-                <th>Prix actuel</th>
-                <th>P&L</th>
-                <th>Liquidation</th>
-              </tr>
-            </thead>
-            <tbody id="binancePositionsBody">
-              <tr><td colspan="7" style="text-align:center;color:var(--text-muted)">Aucune position ouverte</td></tr>
-            </tbody>
-          </table>
-        </div>
+      <div id="noPositions" class="empty-state">
+        Aucune position ouverte
       </div>
     </section>
 
-    <!-- ---- Positions Ouvertes ---- -->
-    <section class="portfolio-section" id="activePositionsSection" style="display:none;">
-      <h2 class="section-title">Positions ouvertes</h2>
-      <div id="activePositionsContainer"></div>
-    </section>
+    <!-- ---- Derniers trades fermes ---- -->
+    <section class="section">
+      <h2 class="section-title">Derniers trades fermes</h2>
 
-    <!-- ---- Graphiques ---- -->
-    <section class="charts-grid">
-      <div class="chart-card full-width">
-        <div class="chart-title">Rentabilite cumulee dans le temps</div>
-        <div class="chart-container">
-          <canvas id="profitChart"></canvas>
-        </div>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">Performance par paire</div>
-        <div class="chart-container">
-          <canvas id="pairChart"></canvas>
-        </div>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">Performance par jour de la semaine</div>
-        <div class="chart-container">
-          <canvas id="dayChart"></canvas>
-        </div>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">Distribution des profits</div>
-        <div class="chart-container">
-          <canvas id="distChart"></canvas>
-        </div>
-      </div>
-      <div class="chart-card">
-        <div class="chart-title">Win Rate par paire</div>
-        <div id="pairStatsContainer" style="overflow-y:auto; max-height:300px;">
-          <table class="pair-stats-table">
-            <thead>
-              <tr>
-                <th>Paire</th>
-                <th>Trades</th>
-                <th>Win Rate</th>
-                <th>Profit</th>
-              </tr>
-            </thead>
-            <tbody id="pairStatsBody"></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
+      <table class="trades-table" id="tradesTable" style="display:none">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Paire</th>
+            <th>Direction</th>
+            <th>Resultat</th>
+            <th>P&L</th>
+          </tr>
+        </thead>
+        <tbody id="closedTrades"></tbody>
+      </table>
 
-    <!-- ---- Tableau des trades (simulation uniquement) ---- -->
-    <section class="trades-section" id="tradesSection">
-      <div class="trades-header">
-        <h2>Historique des trades</h2>
-        <div class="filters">
-          <select class="filter-select" id="filterGroup" onchange="loadTrades()">
-            <option value="">Tous les groupes</option>
-          </select>
-          <select class="filter-select" id="filterStatus" onchange="loadTrades()">
-            <option value="">Tous les statuts</option>
-            <option value="open">En attente</option>
-            <option value="partial">Partiel</option>
-            <option value="closed">Ferme</option>
-            <option value="stopped">Stoppe</option>
-            <option value="manual_close">Ferme manuellement</option>
-            <option value="cancelled">Annule</option>
-          </select>
-          <select class="filter-select" id="filterPair" onchange="loadTrades()">
-            <option value="">Toutes les paires</option>
-          </select>
-          <input type="date" class="filter-input" id="filterFrom" onchange="loadTrades()">
-          <input type="date" class="filter-input" id="filterTo" onchange="loadTrades()">
-        </div>
-      </div>
-
-      <div class="table-wrapper">
-        <table>
-          <thead>
-            <tr>
-              <th onclick="sortTrades('created_at')">Date <span class="sort-arrow">&#9650;</span></th>
-              <th onclick="sortTrades('pair')">Paire <span class="sort-arrow">&#9650;</span></th>
-              <th onclick="sortTrades('direction')">Direction <span class="sort-arrow">&#9650;</span></th>
-              <th>Leverage</th>
-              <th>Position</th>
-              <th>% Ferme</th>
-              <th>Prix Actuel</th>
-              <th onclick="sortTrades('profit_realized_total')">Realise ($) <span class="sort-arrow">&#9650;</span></th>
-              <th>Latent ($)</th>
-              <th onclick="sortTrades('pnl_total')">P&L Total <span class="sort-arrow">&#9650;</span></th>
-              <th onclick="sortTrades('source_group_name')">Source <span class="sort-arrow">&#9650;</span></th>
-              <th onclick="sortTrades('status')">Statut <span class="sort-arrow">&#9650;</span></th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="tradesBody"></tbody>
-        </table>
-      </div>
-
-      <!-- Pagination -->
-      <div class="pagination" id="paginationArea">
-        <span id="paginationInfo"></span>
-        <div class="pagination-buttons">
-          <button class="page-btn" id="prevBtn" onclick="changePage(-1)">Precedent</button>
-          <button class="page-btn" id="nextBtn" onclick="changePage(1)">Suivant</button>
-        </div>
+      <div id="noTrades" class="empty-state">
+        Aucun trade ferme
       </div>
     </section>
 
   </div>
 
-  <!-- ---- Modal Detail Trade ---- -->
-  <div class="modal-overlay" id="tradeModal" onclick="closeModal(event)">
-    <div class="modal-content" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <h3 id="modalTitle">Detail du trade</h3>
-        <button class="modal-close" onclick="closeModal()">&times;</button>
-      </div>
-      <div class="modal-body" id="modalBody">
-        Chargement...
-      </div>
-    </div>
-  </div>
-
-  <!-- ---- Modal Fermeture Manuelle ---- -->
-  <div class="modal-overlay" id="closeModal" onclick="closeCloseModal(event)">
-    <div class="modal-content" onclick="event.stopPropagation()">
-      <div class="modal-header">
-        <h3 id="closeModalTitle">Fermer la position</h3>
-        <button class="modal-close" onclick="closeCloseModal()">&times;</button>
-      </div>
-      <div class="modal-body">
-        <div class="modal-info">
-          <div class="mi-row"><span>Paire</span><span id="closeModalPair">--</span></div>
-          <div class="mi-row"><span>Position restante</span><span id="closeModalRemaining">--</span></div>
-          <div class="mi-row"><span>Prix actuel</span><span id="closeModalPrice">--</span></div>
-        </div>
-        <div style="margin-top:16px;">
-          <label style="font-size:13px;color:var(--text-secondary);">Pourcentage a fermer :</label>
-          <div style="display:flex;gap:8px;margin-top:8px;align-items:center;">
-            <input type="range" id="closePercent" min="1" max="100" value="100" oninput="document.getElementById('closePercentVal').textContent=this.value+'%'" style="flex:1;">
-            <span id="closePercentVal" style="min-width:45px;text-align:right;font-weight:600;">100%</span>
-          </div>
-          <div style="display:flex;gap:8px;margin-top:12px;">
-            <button class="btn btn-close-pct" onclick="setClosePercent(25)">25%</button>
-            <button class="btn btn-close-pct" onclick="setClosePercent(50)">50%</button>
-            <button class="btn btn-close-pct" onclick="setClosePercent(75)">75%</button>
-            <button class="btn btn-close-pct" onclick="setClosePercent(100)">100%</button>
-          </div>
-        </div>
-        <button class="btn btn-confirm-close" id="confirmCloseBtn" style="margin-top:16px;width:100%;">
-          Confirmer la fermeture
-        </button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Chart.js depuis CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
