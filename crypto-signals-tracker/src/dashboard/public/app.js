@@ -66,6 +66,16 @@ async function loadStats() {
     const pnl = stats.pnlToday || 0;
     pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '$';
     pnlEl.className = 'info-value ' + (pnl >= 0 ? 'positive' : 'negative');
+
+    // Warning banner si trop de positions
+    var banner = document.getElementById('warningBanner');
+    var maxPos = stats.maxPositions || 20;
+    if (stats.openPositions > maxPos * 0.75) {
+      banner.textContent = 'ATTENTION : ' + stats.openPositions + ' positions ouvertes (max : ' + maxPos + ')';
+      banner.classList.add('visible');
+    } else {
+      banner.classList.remove('visible');
+    }
   } catch (err) {
     console.error('Erreur stats :', err);
   }

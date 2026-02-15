@@ -23,6 +23,7 @@ const portfolio = require('./portfolio-simulator');
 const binanceClient = require('./binance-client');
 const tradingEngine = require('./trading-engine');
 const TrailingStopManager = require('./trailing-stop-manager');
+const priceUpdater = require('./price-updater');
 const logger = require('./logger');
 
 // Instance du trailing stop manager (demarre apres trading engine)
@@ -123,6 +124,10 @@ async function main() {
     logger.info('[TRAILING] Trailing Stop Manager actif');
   }
 
+  // Demarrer le price updater (P&L latent en temps reel)
+  priceUpdater.start();
+  logger.info('[PRICE-UPDATER] Demarre (mise a jour toutes les 60s)');
+
   // ---- Etape 6 : Ecouter les messages de TOUS les groupes ----
   logger.info('[6/6] Demarrage de l\'ecoute multi-groupes...');
   await telegramClient.listenToGroups(resolvedGroups, handleMessage);
@@ -144,12 +149,71 @@ async function main() {
   logger.info('=== Application demarree avec succes ! ===');
   logger.info(`Ecoute de ${resolvedGroups.length} groupes... (Ctrl+C pour arreter)`);
 
+  // Verification coherence DB vs Binance au demarrage (apres 5s)
+  setTimeout(() => checkConsistency(), 5000);
+
   // Log diagnostic toutes les 30 minutes pour confirmer que l'app tourne
   setInterval(() => {
     const counters = telegramClient.getMessageCounters();
     const dbCount = database.countSignals();
     logger.info(`[HEARTBEAT] Uptime: ${Math.round(process.uptime() / 60)} min | Messages: total=${counters.total} cibles=${counters.matched} parses=${counters.parsed} | DB: ${dbCount.total} signaux (${dbCount.open} ouverts)`);
   }, 30 * 60 * 1000).unref();
+}
+
+// ============================================================
+// VERIFICATION COHERENCE AU DEMARRAGE
+// ============================================================
+
+/**
+ * Verifie la coherence entre la base de donnees et Binance.
+ * Envoie une alerte si desynchronisation detectee.
+ */
+async function checkConsistency() {
+  try {
+    const openDb = database.countOpenPositions();
+    const maxPositions = parseInt(process.env.MAX_OPEN_POSITIONS || '20', 10);
+
+    let openBinance = 0;
+    if (tradingEngine.isActive()) {
+      try {
+        const positions = await tradingEngine.syncPositions();
+        openBinance = positions.length;
+      } catch (err) {
+        logger.warn(`[CONSISTENCY] Erreur Binance: ${err.message}`);
+      }
+    }
+
+    logger.info('==================================================');
+    logger.info('[VERIFICATION DEMARRAGE]');
+    logger.info(`  Positions en base : ${openDb}`);
+    logger.info(`  Positions Binance : ${openBinance}`);
+    logger.info(`  Limite configuree : ${maxPositions}`);
+
+    if (tradingEngine.isActive() && openDb !== openBinance) {
+      logger.warn(`  DESYNCHRONISATION: DB=${openDb} vs Binance=${openBinance}`);
+      await tradingEngine.sendAlert(
+        `DESYNCHRONISATION AU DEMARRAGE\n` +
+        `Base de donnees: ${openDb} positions\n` +
+        `Binance: ${openBinance} positions\n` +
+        `Verifiez manuellement`
+      );
+    } else {
+      logger.info(`  Base de donnees et Binance synchronises`);
+    }
+
+    if (openDb > maxPositions) {
+      logger.warn(`  ATTENTION: ${openDb} positions > limite ${maxPositions}!`);
+      await tradingEngine.sendAlert(
+        `ATTENTION: ${openDb} positions ouvertes\n` +
+        `Limite configuree: ${maxPositions}\n` +
+        `Verifiez et fermez les positions excedentaires`
+      );
+    }
+
+    logger.info('==================================================');
+  } catch (err) {
+    logger.error(`[CONSISTENCY] Erreur verification: ${err.message}`);
+  }
 }
 
 // ============================================================
@@ -410,10 +474,11 @@ async function shutdown(signal) {
     // Ignorer les erreurs de notification lors de l'arret
   }
 
-  // Arreter le trailing stop manager
+  // Arreter le trailing stop manager et le price updater
   if (trailingStopManager) {
     trailingStopManager.stop();
   }
+  priceUpdater.stop();
 
   // Fermer les connexions
   await telegramClient.disconnect();

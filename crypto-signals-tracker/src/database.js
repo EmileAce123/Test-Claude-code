@@ -1030,6 +1030,37 @@ function getReactionTimeStats(date) {
 }
 
 // ============================================================
+// BULK OPERATIONS
+// ============================================================
+
+/**
+ * Met a jour le status de tous les signaux ouverts (kill switch, etc.).
+ * @param {string} newStatus - Nouveau status (ex: 'killed')
+ * @returns {{ changes: number }} Nombre de lignes modifiees
+ */
+function bulkCloseOpenSignals(newStatus) {
+  const result = db.prepare(
+    `UPDATE signals SET
+      status = ?,
+      trailing_active = 0,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE status IN ('open', 'partial', 'active', 'pending', 'order_placed')`
+  ).run(newStatus);
+  return { changes: result.changes };
+}
+
+/**
+ * Compte les positions ouvertes (tous statuts actifs).
+ * @returns {number} Nombre de positions ouvertes
+ */
+function countOpenPositions() {
+  const result = db.prepare(
+    "SELECT COUNT(*) as count FROM signals WHERE status IN ('open', 'partial', 'active', 'pending', 'order_placed')"
+  ).get();
+  return result.count;
+}
+
+// ============================================================
 // TRAILING STOP - FONCTIONS DATA
 // ============================================================
 
@@ -1146,4 +1177,7 @@ module.exports = {
   // Trailing stop
   getTrailingActivePositions,
   updateTrailingInfo,
+  // Bulk operations
+  bulkCloseOpenSignals,
+  countOpenPositions,
 };

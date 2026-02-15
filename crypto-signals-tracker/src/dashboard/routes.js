@@ -39,9 +39,13 @@ router.get('/stats/today', async (req, res) => {
     // P&L du jour depuis snapshot
     const snapshot = database.getDailySnapshot(today);
 
+    // Compter toutes les positions ouvertes (pas juste celles du jour)
+    const openPositionsCount = database.countOpenPositions();
+
     res.json({
       totalTrades: dayStats.total_trades,
-      openPositions: dayStats.open_trades,
+      openPositions: openPositionsCount,
+      maxPositions: tradingEngine.maxOpenPositions || 20,
       winRate,
       avgReactionTime: reactionStats.count > 0 ? `${reactionStats.avg_ms}ms` : '--',
       pnlToday: snapshot ? snapshot.pnl_vs_yesterday : 0,

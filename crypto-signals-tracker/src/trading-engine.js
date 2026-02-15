@@ -394,15 +394,30 @@ class TradingEngine {
     }
     logger.debug(`[TRADING]   Balance: position=${positionSize.toFixed(2)}$ (${this.maxPositionPercent}% de ${balance.toFixed(2)}$) -> ${positionSize >= 5 ? 'OK' : 'INSUFFISANT'}`);
 
-    // Max positions simultanees (via Binance, pas la BDD)
+    // Max positions simultanees - verifier BINANCE ET BDD (prendre le max)
+    let openCount = 0;
     try {
-      const openPositions = await this.syncPositions();
-      if (openPositions.length >= this.maxOpenPositions) {
-        reasons.push(`Max positions simultanees atteinte (${openPositions.length}/${this.maxOpenPositions})`);
+      const openBinance = await this.syncPositions();
+      const openDb = database.countOpenPositions();
+      openCount = Math.max(openBinance.length, openDb);
+      logger.info(`[TRADING]   Positions: Binance=${openBinance.length} | DB=${openDb} | Max=${this.maxOpenPositions}`);
+
+      if (openCount >= this.maxOpenPositions) {
+        reasons.push(`Limite positions atteinte (${openCount}/${this.maxOpenPositions})`);
+        logger.warn(`[TRADING]   LIMITE ATTEINTE: ${openCount}/${this.maxOpenPositions}`);
       }
-      logger.debug(`[TRADING]   Positions ouvertes: ${openPositions.length}/${this.maxOpenPositions} -> ${openPositions.length < this.maxOpenPositions ? 'OK' : 'LIMITE'}`);
     } catch (err) {
-      logger.warn(`[TRADING]   Impossible de verifier positions ouvertes: ${err.message}`);
+      // Fallback: verifier au moins la BDD
+      try {
+        const openDb = database.countOpenPositions();
+        openCount = openDb;
+        if (openDb >= this.maxOpenPositions) {
+          reasons.push(`Limite positions atteinte (DB=${openDb}/${this.maxOpenPositions})`);
+        }
+        logger.info(`[TRADING]   Positions (DB uniquement): ${openDb}/${this.maxOpenPositions}`);
+      } catch (e) {
+        logger.warn(`[TRADING]   Impossible de verifier positions ouvertes: ${err.message}`);
+      }
     }
 
     // Perte quotidienne max
@@ -431,6 +446,16 @@ class TradingEngine {
 
     if (reasons.length > 0) {
       logger.warn(`[TRADING] Trade refuse: ${reasons.join(', ')}`);
+
+      // Alerte specifique si limite de positions atteinte
+      if (openCount >= this.maxOpenPositions) {
+        await this.sendAlert(
+          `LIMITE POSITIONS ATTEINTE\n` +
+          `${openCount}/${this.maxOpenPositions} positions ouvertes\n` +
+          `Signal ${signal.pair} ${signal.direction} ignore\n` +
+          `Fermez des positions avant d'en ouvrir`
+        );
+      }
     }
 
     return { valid: reasons.length === 0, reasons };
@@ -912,23 +937,30 @@ class TradingEngine {
 
   /**
    * Kill switch : ferme TOUTES les positions d'urgence.
-   * @returns {{ closed: number, errors: number }}
+   * Met a jour la BDD et envoie une alerte detaillee.
+   * @returns {{ closed: number, errors: number, dbUpdated: number }}
    */
   async emergencyCloseAll() {
     if (!this.initialized || !this.client) {
       logger.warn('[TRADING] Kill switch: engine non initialise');
-      return { closed: 0, errors: 0 };
+      return { closed: 0, errors: 0, dbUpdated: 0 };
     }
 
+    logger.error('==================================================');
     logger.error('[TRADING] KILL SWITCH ACTIVE - FERMETURE DE TOUTES LES POSITIONS');
+    logger.error('==================================================');
     this.killSwitchActive = true;
 
     let closed = 0;
     let errors = 0;
+    const errorDetails = [];
 
     try {
+      // 1. Recuperer toutes les positions Binance
       const positions = await this.syncPositions();
+      logger.error(`[TRADING] KILL: ${positions.length} position(s) a fermer sur Binance`);
 
+      // 2. Fermer chaque position
       for (const pos of positions) {
         try {
           // Annuler tous les ordres en attente
@@ -944,7 +976,6 @@ class TradingEngine {
             }
             closeQty = this.roundToPrecision(closeQty, symInfo.quantityPrecision);
           } catch (e) {
-            // Fallback: garder la quantite brute
             logger.warn(`[TRADING] KILL: Impossible de recuperer precision ${pos.symbol}, utilisation quantite brute`);
           }
 
@@ -960,22 +991,78 @@ class TradingEngine {
           closed++;
         } catch (err) {
           logger.error(`[TRADING] KILL erreur ${pos.symbol}: ${err.message}`);
+          errorDetails.push(`${pos.symbol}: ${err.message}`);
           errors++;
         }
       }
 
-      await this.sendAlert(
-        `KILL SWITCH ACTIVE\n` +
-        `${closed} position(s) fermee(s)\n` +
-        `${errors} erreur(s)\n` +
-        `Verifiez votre compte Binance`
-      );
+      // 3. CRITIQUE : Mettre a jour TOUS les trades en base
+      const dbResult = database.bulkCloseOpenSignals('killed');
+      logger.error(`[TRADING] KILL: Base de donnees: ${dbResult.changes} trades marques "killed"`);
+
+      // 4. Arreter tous les TP monitors
+      for (const [signalId, intervalId] of this.tpMonitors) {
+        clearInterval(intervalId);
+      }
+      this.tpMonitors.clear();
+      logger.info(`[TRADING] KILL: Tous les TP monitors arretes`);
+
+      // 5. Verification finale
+      let remainingBinance = 0;
+      try {
+        const remaining = await this.syncPositions();
+        remainingBinance = remaining.length;
+      } catch (e) { /* ignore */ }
+
+      const remainingDb = database.countOpenPositions();
+
+      // 6. Alerte detaillee
+      let alertMsg = `KILL SWITCH EXECUTE\n\n` +
+        `Binance:\n` +
+        `  Fermees: ${closed}/${positions.length}\n` +
+        `  Restantes: ${remainingBinance}\n\n` +
+        `Base de donnees:\n` +
+        `  Mises a jour: ${dbResult.changes} trades\n` +
+        `  Restantes: ${remainingDb}`;
+
+      if (errorDetails.length > 0) {
+        alertMsg += `\n\nErreurs (${errorDetails.length}):\n` +
+          errorDetails.slice(0, 5).join('\n');
+      }
+
+      if (remainingBinance > 0 || remainingDb > 0) {
+        alertMsg += `\n\nATTENTION: Verifiez manuellement Binance!`;
+      }
+
+      await this.sendAlert(alertMsg);
+
+      logger.error('==================================================');
+      logger.error(`[TRADING] KILL SWITCH TERMINE`);
+      logger.error(`  ${closed} positions fermees sur Binance`);
+      logger.error(`  ${dbResult.changes} trades mis a jour en DB`);
+      logger.error('==================================================');
+
+      return { closed, errors, dbUpdated: dbResult.changes };
 
     } catch (err) {
-      logger.error(`[TRADING] Erreur kill switch: ${err.message}`);
-    }
+      logger.error(`[TRADING] ERREUR CRITIQUE KILL SWITCH: ${err.message}`);
 
-    return { closed, errors };
+      // Tenter quand meme la mise a jour DB
+      try {
+        const dbResult = database.bulkCloseOpenSignals('killed');
+        logger.error(`[TRADING] DB mise a jour en fallback: ${dbResult.changes} trades`);
+      } catch (e) {
+        logger.error(`[TRADING] IMPOSSIBLE de mettre a jour la DB: ${e.message}`);
+      }
+
+      await this.sendAlert(
+        `ERREUR KILL SWITCH\n` +
+        `${err.message}\n` +
+        `VERIFIEZ MANUELLEMENT BINANCE IMMEDIATEMENT`
+      );
+
+      return { closed, errors, dbUpdated: 0 };
+    }
   }
 
   /**

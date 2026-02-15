@@ -150,6 +150,22 @@ body {
   transform: none;
 }
 
+/* ---- Warning Banner ---- */
+.warning-banner {
+  background: #dc2626;
+  color: white;
+  padding: 12px 24px;
+  text-align: center;
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.3px;
+  display: none;
+}
+
+.warning-banner.visible {
+  display: block;
+}
+
 /* ---- Container ---- */
 .container {
   max-width: 1200px;
