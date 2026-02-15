@@ -37,10 +37,12 @@ async function loadBalance() {
     const data = await res.json();
 
     const balanceEl = document.getElementById('balance');
-    if (data.totalBalance != null) {
-      balanceEl.textContent = data.totalBalance.toFixed(2) + ' USDT';
-    } else if (data.balance != null) {
-      balanceEl.textContent = data.balance.toFixed(2) + ' USDT';
+    // Priorite: marginBalance (wallet + P&L latent) > totalBalance > balance
+    var bal = data.marginBalance != null ? data.marginBalance
+            : data.totalBalance != null ? data.totalBalance
+            : data.balance;
+    if (bal != null) {
+      balanceEl.textContent = bal.toFixed(2) + ' USDT';
     }
   } catch (err) {
     console.error('Erreur balance :', err);
@@ -229,31 +231,17 @@ async function closePosition(symbol) {
   if (!confirm('Fermer la position ' + symbol + ' ?')) return;
 
   try {
-    // Chercher le signal correspondant via Binance positions
-    var res = await fetch('/api/binance/positions');
-    var data = await res.json();
-    var position = data.positions.find(function(p) {
-      return p.symbol === symbol || (p.pair && p.pair.replace('/', '') === symbol);
+    // Utiliser le endpoint unique qui gere simulation ET trading reel
+    var closeRes = await fetch('/api/trades/' + symbol + '/close-single', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
     });
+    var result = await closeRes.json();
 
-    if (position && position.id) {
-      // Mode simulation : fermeture via API trades
-      var closeRes = await fetch('/api/trades/' + position.id + '/close', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ percent: 100 }),
-      });
-      var result = await closeRes.json();
-      if (result.success) {
-        alert('Position fermee !');
-      } else {
-        alert('Erreur: ' + (result.error || 'Erreur inconnue'));
-      }
+    if (result.success) {
+      alert('Position ' + symbol + ' fermee !');
     } else {
-      // Mode trading reel : fermeture via trading engine (emergency close sur le symbole)
-      var closeRes = await fetch('/api/emergency/close-all', { method: 'POST' });
-      var result = await closeRes.json();
-      alert(result.message || 'Positions fermees');
+      alert('Erreur: ' + (result.error || 'Erreur inconnue'));
     }
 
     loadDashboard();

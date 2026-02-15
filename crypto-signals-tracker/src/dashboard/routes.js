@@ -225,6 +225,60 @@ router.get('/trades/:id/executions', (req, res) => {
   }
 });
 
+// ---- POST /api/trades/:symbol/close-single ----
+// Ferme UNE position specifique par symbole (ex: BTCUSDT)
+// Fonctionne en mode simulation ET trading reel
+router.post('/trades/:symbol/close-single', async (req, res) => {
+  try {
+    const symbol = req.params.symbol;
+    // Convertir BTCUSDT -> BTC/USDT pour matcher la BDD
+    const pair = symbol.replace(/USDT$/, '/USDT');
+
+    logger.info(`[API] Demande fermeture position unique: ${symbol} (pair=${pair})`);
+
+    // Trouver le signal ouvert pour cette paire
+    const signal = database.findOpenSignal(pair);
+
+    if (!signal) {
+      logger.warn(`[API] Aucune position ouverte en BDD pour ${pair}`);
+      return res.status(404).json({ error: `Aucune position ouverte pour ${symbol}` });
+    }
+
+    if (tradingEngine.isActive()) {
+      // Mode trading reel: fermer sur Binance + update DB
+      const closeResult = await tradingEngine.closePosition(signal, 'manual');
+      logger.info(`[API] Position ${symbol} fermee sur Binance (signal #${signal.id})`);
+      res.json({
+        success: true,
+        message: `Position ${symbol} fermee`,
+        mode: tradingEngine.mode,
+        signalId: signal.id,
+      });
+    } else {
+      // Mode simulation: fermeture virtuelle
+      const currentPrice = signal.current_price;
+      if (!currentPrice) {
+        return res.status(400).json({ error: 'Prix actuel non disponible' });
+      }
+      const result = portfolio.executeManualClose(signal.id, 100, currentPrice);
+      if (!result) {
+        return res.status(500).json({ error: 'Erreur execution de la fermeture' });
+      }
+      logger.info(`[API] Position ${symbol} fermee en simulation (signal #${signal.id})`);
+      res.json({
+        success: true,
+        message: `Position ${symbol} fermee (simulation)`,
+        mode: 'simulation',
+        profit: result.profitNet,
+        signalId: signal.id,
+      });
+    }
+  } catch (err) {
+    logger.error(`[API] Erreur fermeture ${req.params.symbol}: ${err.message}`);
+    res.status(500).json({ error: 'Erreur fermeture position' });
+  }
+});
+
 // ---- POST /api/trades/:id/close ----
 // Ferme manuellement tout ou partie d'une position
 // Body: { percent: 50 } (optionnel, defaut = tout le restant)
