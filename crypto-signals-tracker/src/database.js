@@ -1060,6 +1060,31 @@ function countOpenPositions() {
   return result.count;
 }
 
+/**
+ * Recupere toutes les positions ouvertes (tous statuts actifs).
+ * @returns {Array} Liste de signaux avec id, pair, status, direction
+ */
+function getAllOpenSignals() {
+  return db.prepare(
+    "SELECT id, pair, status, direction, leverage FROM signals WHERE status IN ('open', 'partial', 'active', 'pending', 'order_placed') ORDER BY created_at DESC"
+  ).all();
+}
+
+/**
+ * Marque un signal specifique avec un nouveau status.
+ * @param {number} signalId - ID du signal
+ * @param {string} newStatus - Nouveau status (ex: 'ghost', 'closed')
+ */
+function markSignalStatus(signalId, newStatus) {
+  db.prepare(
+    `UPDATE signals SET
+      status = ?,
+      trailing_active = 0,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?`
+  ).run(newStatus, signalId);
+}
+
 // ============================================================
 // TRAILING STOP - FONCTIONS DATA
 // ============================================================
@@ -1180,4 +1205,6 @@ module.exports = {
   // Bulk operations
   bulkCloseOpenSignals,
   countOpenPositions,
+  getAllOpenSignals,
+  markSignalStatus,
 };

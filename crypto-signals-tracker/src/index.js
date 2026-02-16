@@ -149,8 +149,8 @@ async function main() {
   logger.info('=== Application demarree avec succes ! ===');
   logger.info(`Ecoute de ${resolvedGroups.length} groupes... (Ctrl+C pour arreter)`);
 
-  // Verification coherence DB vs Binance au demarrage (apres 5s)
-  setTimeout(() => checkConsistency(), 5000);
+  // Synchronisation DB vs Binance au demarrage (apres 5s)
+  setTimeout(() => syncDatabaseWithBinance(), 5000);
 
   // Log diagnostic toutes les 30 minutes pour confirmer que l'app tourne
   setInterval(() => {
@@ -161,58 +161,94 @@ async function main() {
 }
 
 // ============================================================
-// VERIFICATION COHERENCE AU DEMARRAGE
+// SYNCHRONISATION DB <-> BINANCE AU DEMARRAGE
 // ============================================================
 
 /**
- * Verifie la coherence entre la base de donnees et Binance.
- * Envoie une alerte si desynchronisation detectee.
+ * Synchronise la base de donnees avec Binance au demarrage.
+ * Detecte et nettoie les positions "fantomes" (en DB mais plus sur Binance).
+ * Envoie une alerte si des corrections sont effectuees.
  */
-async function checkConsistency() {
+async function syncDatabaseWithBinance() {
   try {
-    const openDb = database.countOpenPositions();
     const maxPositions = parseInt(process.env.MAX_OPEN_POSITIONS || '20', 10);
 
-    let openBinance = 0;
-    if (tradingEngine.isActive()) {
-      try {
-        const positions = await tradingEngine.syncPositions();
-        openBinance = positions.length;
-      } catch (err) {
-        logger.warn(`[CONSISTENCY] Erreur Binance: ${err.message}`);
-      }
+    // En mode simulation, juste log et return
+    if (!tradingEngine.isActive()) {
+      const openDb = database.countOpenPositions();
+      logger.info('==================================================');
+      logger.info('[SYNC DEMARRAGE] Mode simulation');
+      logger.info(`  Positions en base : ${openDb}`);
+      logger.info(`  Limite configuree : ${maxPositions}`);
+      logger.info('==================================================');
+      return;
     }
+
+    // 1. Recuperer positions Binance
+    let binancePositions = [];
+    try {
+      binancePositions = await tradingEngine.syncPositions();
+    } catch (err) {
+      logger.error(`[SYNC] Erreur Binance: ${err.message}`);
+      return;
+    }
+
+    const binanceSymbols = new Set(binancePositions.map(p => p.symbol));
+
+    // 2. Recuperer positions DB
+    const dbPositions = database.getAllOpenSignals();
 
     logger.info('==================================================');
-    logger.info('[VERIFICATION DEMARRAGE]');
-    logger.info(`  Positions en base : ${openDb}`);
-    logger.info(`  Positions Binance : ${openBinance}`);
-    logger.info(`  Limite configuree : ${maxPositions}`);
+    logger.info('[SYNC DEMARRAGE] Synchronisation DB <-> Binance');
+    logger.info(`  Binance : ${binancePositions.length} position(s)`);
+    logger.info(`  Base    : ${dbPositions.length} position(s)`);
 
-    if (tradingEngine.isActive() && openDb !== openBinance) {
-      logger.warn(`  DESYNCHRONISATION: DB=${openDb} vs Binance=${openBinance}`);
+    // 3. Trouver les fantomes (en DB mais pas sur Binance)
+    const ghosts = dbPositions.filter(dbPos => {
+      const symbol = dbPos.pair.replace('/', '');
+      return !binanceSymbols.has(symbol);
+    });
+
+    if (ghosts.length > 0) {
+      logger.warn(`[SYNC] ${ghosts.length} position(s) fantome(s) detectee(s) :`);
+
+      for (const ghost of ghosts) {
+        logger.warn(`[SYNC]   - ${ghost.pair} (ID: ${ghost.id}, status: ${ghost.status})`);
+        database.markSignalStatus(ghost.id, 'ghost');
+      }
+
+      logger.info(`[SYNC] ${ghosts.length} position(s) fantome(s) nettoyee(s) (status -> ghost)`);
+
       await tradingEngine.sendAlert(
-        `DESYNCHRONISATION AU DEMARRAGE\n` +
-        `Base de donnees: ${openDb} positions\n` +
-        `Binance: ${openBinance} positions\n` +
-        `Verifiez manuellement`
+        `NETTOYAGE AUTO AU DEMARRAGE\n` +
+        `${ghosts.length} position(s) fantome(s) detectee(s)\n` +
+        `Paires: ${ghosts.map(g => g.pair).join(', ')}\n` +
+        `Marquees "ghost" en base (fermees sur Binance)`
       );
+    }
+
+    // 4. Verification finale
+    const finalDb = database.countOpenPositions();
+
+    if (finalDb === binancePositions.length) {
+      logger.info(`[SYNC] SYNCHRONISE : DB=${finalDb} = Binance=${binancePositions.length}`);
     } else {
-      logger.info(`  Base de donnees et Binance synchronises`);
+      logger.warn(`[SYNC] Encore desynchronise : DB=${finalDb} vs Binance=${binancePositions.length}`);
     }
 
-    if (openDb > maxPositions) {
-      logger.warn(`  ATTENTION: ${openDb} positions > limite ${maxPositions}!`);
+    if (finalDb > maxPositions) {
+      logger.warn(`[SYNC] ATTENTION: ${finalDb} positions > limite ${maxPositions}!`);
       await tradingEngine.sendAlert(
-        `ATTENTION: ${openDb} positions ouvertes\n` +
+        `ATTENTION: ${finalDb} positions ouvertes\n` +
         `Limite configuree: ${maxPositions}\n` +
-        `Verifiez et fermez les positions excedentaires`
+        `Fermez les positions excedentaires`
       );
     }
 
+    logger.info(`  Limite configuree : ${maxPositions}`);
     logger.info('==================================================');
   } catch (err) {
-    logger.error(`[CONSISTENCY] Erreur verification: ${err.message}`);
+    logger.error(`[SYNC] Erreur synchronisation: ${err.message}`);
   }
 }
 
